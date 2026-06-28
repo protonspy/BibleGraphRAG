@@ -49,3 +49,41 @@ def build_episodes(records: list[dict], translation: str) -> list[Episode]:
             )
         )
     return episodes
+
+
+def build_pericope_episodes(
+    records: list[dict], translation: str, pericope_map: dict
+) -> list[Episode]:
+    """Group verses into one episode per pericope, using a cached pericope map.
+
+    `pericope_map` is the {"Book Chapter": [{start_verse, end_verse, title}, ...]} structure
+    produced by core.pipe.pericope. A chapter missing from the map falls back to a single
+    whole-chapter episode, so build never silently drops verses. `index` increments per
+    episode in canonical order for a monotonic reference_time.
+    """
+    episodes: list[Episode] = []
+    for (book, chapter), group in groupby(records, key=lambda r: (r["book"], r["chapter"])):
+        verses = list(group)
+        spans = pericope_map.get(f"{book} {chapter}") or [
+            {"start_verse": verses[0]["verse"], "end_verse": verses[-1]["verse"], "title": ""}
+        ]
+        for span in spans:
+            lo, hi = span["start_verse"], span["end_verse"]
+            in_span = [v for v in verses if lo <= v["verse"] <= hi]
+            if not in_span:
+                continue
+            ref = f"{book} {chapter}:{lo}-{hi}" if lo != hi else f"{book} {chapter}:{lo}"
+            title = (span.get("title") or "").strip()
+            body = "\n".join(f"{v['verse']} {v['content']}" for v in in_span)
+            episodes.append(
+                Episode(
+                    name=f"{ref} — {title}" if title else ref,
+                    body=body,
+                    source_description=f"{translation} — {ref}",
+                    index=len(episodes),
+                    book=book,
+                    chapter=chapter,
+                    verses=len(in_span),
+                )
+            )
+    return episodes

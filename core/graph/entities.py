@@ -22,11 +22,11 @@ What is NOT an entity type (model as a relation or attribute instead)
 These recur constantly in the text and would explode the node count for little query
 value. They belong in the edge_type_map / as fact attributes, not here — the relevant
 restraints are echoed in the class docstrings below to steer the LLM at extraction:
-  * Kinship / genealogy ("son of", "father of") -> relation (FATHER_OF, DESCENDANT_OF).
+  * Kinship / genealogy ("son of", "father of") -> relation (PARENT_OF, MARRIED_TO; see EDGE_TYPES).
   * Numbers / quantities ("forty days", "twelve tribes") -> attribute of a fact.
   * Divine names / attributes ("the Almighty", "Emmanuel") -> aliases of the Deity node.
   * Prophecies / blessings / curses / individual laws -> relations with attributes
-    (BLESSED, COMMANDED, PRONOUNCED_JUDGMENT_ON), not Event nodes.
+    (BLESSED, COMMANDED, CURSED; see EDGE_TYPES), not Event nodes.
 
 Deferred to a later version
 ---------------------------
@@ -95,12 +95,23 @@ class Creature(BaseModel):
     """
 
 
+class Plant(BaseModel):
+    """A specific, named or narratively significant tree, plant, or vegetation.
+
+    Use for individual plants that carry narrative or symbolic weight: the Tree of Life, the
+    Tree of Knowledge of Good and Evil, the burning bush, Jonah's gourd, the vine of John 15.
+    A garden or field as a location is a Place, not a Plant; a fashioned wooden object (an
+    ark, a staff) is an Artifact. Generic vegetation mentioned only in passing ("herb",
+    "grass") is not an entity.
+    """
+
+
 class Artifact(BaseModel):
     """A notable physical object: ark, tabernacle furnishing, altar, idol, scroll, tablets,
     vessel, garment, weapon, the bronze serpent.
 
     A physical object that is also a text (the tablets of the covenant, the book of the law)
-    is an Artifact.
+    is an Artifact. A living tree or plant is a Plant, not an Artifact.
     """
 
 
@@ -143,8 +154,185 @@ ENTITY_TYPES: dict[str, type[BaseModel]] = {
     "Deity": Deity,
     "DivineBeing": DivineBeing,
     "Creature": Creature,
+    "Plant": Plant,
     "Artifact": Artifact,
     "Event": Event,
     "TimePeriod": TimePeriod,
     "Title": Title,
+}
+
+
+# ---------------------------------------------------------------------------
+# Edge (relationship) types
+# ---------------------------------------------------------------------------
+# Graphiti stores every edge as a Neo4j RELATES_TO relationship whose `name`
+# property holds the predicate. Without a controlled vocabulary the LLM invents a
+# fresh predicate per episode, so one relation surfaces under synonyms (SPOKE_TO
+# vs SAID_TO, COMPASSES vs "goes toward"). Defining edge types pins the vocabulary:
+# the *dict key* in EDGE_TYPES is the predicate the extractor is steered to reuse,
+# and the class *docstring* is the semantic definition fed to the LLM — same
+# convention, and same field-less rationale, as the entity types above.
+#
+# All edge types are advertised to the extractor on every episode; EDGE_TYPE_MAP
+# declares which predicates are valid between which (source_label, target_label)
+# node-type pairs. Graphiti always merges the ('Entity', 'Entity') entry into the
+# candidate set for any pair, so predicates listed there are offered everywhere;
+# the type-specific pairs add type-bound predicates on top. A predicate the LLM
+# still emits outside this vocabulary is NOT dropped — it is kept as a generic
+# RELATES_TO edge carrying that raw name.
+
+
+class SpokeTo(BaseModel):
+    """One entity verbally addresses another: says to, speaks to, calls to, asks, answers,
+    replies. Use this single predicate for any act of speech directed at a hearer, regardless
+    of the exact wording in the text."""
+
+
+class Commanded(BaseModel):
+    """One entity issues a binding command, charge, or instruction to another (a positive
+    'you shall' / 'do this'). For a forbidding command use PROHIBITED instead."""
+
+
+class Prohibited(BaseModel):
+    """One entity forbids another from an action (a negative command, 'you shall not'). What
+    is forbidden belongs in the fact text, not as a separate edge to the thing."""
+
+
+class Blessed(BaseModel):
+    """One entity pronounces a blessing or favor upon a person, group, creature, place, or
+    appointed time."""
+
+
+class Cursed(BaseModel):
+    """One entity pronounces a curse, judgment, or sentence of punishment upon another."""
+
+
+class Created(BaseModel):
+    """A creative or generative act: to create, form, make, plant, or cause to grow an entity.
+    Use for God forming man, planting a garden, or causing a tree to grow. For fashioning a
+    physical object on someone's behalf use MADE_FOR instead."""
+
+
+class MadeFor(BaseModel):
+    """One entity fashions or provides a physical object for the benefit of another (e.g. God
+    made coats of skins for Adam and Eve)."""
+
+
+class Placed(BaseModel):
+    """One entity sets or positions another entity at a location (e.g. God placed the cherubim
+    and the flaming sword at the east of the garden)."""
+
+
+class Gave(BaseModel):
+    """One entity hands over or transfers an object to another (e.g. Eve gave the fruit to
+    Adam)."""
+
+
+class Named(BaseModel):
+    """One entity assigns a name to another (e.g. Adam named his wife Eve)."""
+
+
+class MarriedTo(BaseModel):
+    """A marriage / spousal bond between two persons. Symmetric in meaning; record once."""
+
+
+class ParentOf(BaseModel):
+    """A parent-to-child kinship relation between two persons; direction is parent -> child.
+    Covers 'father of', 'mother of', 'begat'."""
+
+
+class HidFrom(BaseModel):
+    """One entity conceals itself or hides from another (e.g. Adam hid from the presence of
+    the LORD God)."""
+
+
+class Deceived(BaseModel):
+    """One entity deceives, tempts, or beguiles another into acting (e.g. the serpent deceived
+    Eve)."""
+
+
+class EnmityWith(BaseModel):
+    """A relation of declared hostility, conflict, or enmity between two entities (e.g. the
+    enmity put between the serpent and the woman). Symmetric in meaning; record once."""
+
+
+class Exiled(BaseModel):
+    """One entity drives out, sends forth, or banishes another from a place (e.g. God sent
+    Adam forth from the Garden of Eden)."""
+
+
+class LocatedIn(BaseModel):
+    """A place is situated within, or part of, a larger place — a region, land, or
+    territory."""
+
+
+class FlowsThrough(BaseModel):
+    """A river or watercourse runs through, around, toward, or waters a land or region. Use for
+    any 'compasses', 'goes toward', or 'waters' relation between a river and the land it
+    traverses."""
+
+
+class Guards(BaseModel):
+    """One entity protects, keeps, or blocks the way to another (e.g. the flaming sword guards
+    the way to the Tree of Life)."""
+
+
+class Consecrated(BaseModel):
+    """One entity sets apart, sanctifies, hallows, or rests upon a time or place as holy (e.g.
+    God sanctified and rested on the seventh day)."""
+
+
+# Passed to Graphiti.add_episode(edge_types=...). Keys are the predicate names the
+# extractor reuses; they are stored verbatim on the RELATES_TO edge's `name`.
+EDGE_TYPES: dict[str, type[BaseModel]] = {
+    "SPOKE_TO": SpokeTo,
+    "COMMANDED": Commanded,
+    "PROHIBITED": Prohibited,
+    "BLESSED": Blessed,
+    "CURSED": Cursed,
+    "CREATED": Created,
+    "MADE_FOR": MadeFor,
+    "PLACED": Placed,
+    "GAVE": Gave,
+    "NAMED": Named,
+    "MARRIED_TO": MarriedTo,
+    "PARENT_OF": ParentOf,
+    "HID_FROM": HidFrom,
+    "DECEIVED": Deceived,
+    "ENMITY_WITH": EnmityWith,
+    "EXILED": Exiled,
+    "LOCATED_IN": LocatedIn,
+    "FLOWS_THROUGH": FlowsThrough,
+    "GUARDS": Guards,
+    "CONSECRATED": Consecrated,
+}
+
+# Passed to Graphiti.add_episode(edge_type_map=...). Keys are (source_label,
+# target_label) pairs of ENTITY_TYPES names (or 'Entity'); values are the subset of
+# EDGE_TYPES valid for that pair. ('Entity', 'Entity') is always merged in by
+# Graphiti, so it holds the actor-agnostic predicates; the specific pairs add
+# type-bound ones.
+EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
+    # Actor-agnostic predicates — offered for every (source, target) pair.
+    ("Entity", "Entity"): [
+        "SPOKE_TO", "COMMANDED", "PROHIBITED", "BLESSED", "CURSED",
+        "GAVE", "NAMED", "HID_FROM", "DECEIVED", "ENMITY_WITH",
+    ],
+    # Divine agency: creation, provision, positioning, banishment, consecration.
+    ("Deity", "Person"): ["CREATED", "MADE_FOR", "EXILED"],
+    ("Deity", "Creature"): ["CREATED"],
+    ("Deity", "Plant"): ["CREATED"],
+    ("Deity", "Place"): ["CREATED", "PLACED"],
+    ("Deity", "Artifact"): ["CREATED", "PLACED"],
+    ("Deity", "DivineBeing"): ["CREATED", "PLACED"],
+    ("Deity", "TimePeriod"): ["CONSECRATED"],
+    # Kinship between persons.
+    ("Person", "Person"): ["MARRIED_TO", "PARENT_OF"],
+    # Geography: rivers and regions.
+    ("Place", "Place"): ["LOCATED_IN", "FLOWS_THROUGH"],
+    # Guarding the way to a place or plant.
+    ("Artifact", "Plant"): ["GUARDS"],
+    ("Artifact", "Place"): ["GUARDS"],
+    ("DivineBeing", "Plant"): ["GUARDS"],
+    ("DivineBeing", "Place"): ["GUARDS"],
 }

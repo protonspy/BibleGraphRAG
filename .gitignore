@@ -219,3 +219,5 @@ __marimo__/
 
 data/*.txt
 output/*.json
+export/*.json
+cache/*.json
