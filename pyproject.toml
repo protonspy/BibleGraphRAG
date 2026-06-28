@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.10,<4"
 dependencies = [
     "graphiti-core>=0.29.2",
+    "pydantic-settings>=2.0",
+    "tiktoken>=0.13.0",
 ]
 
 [project.scripts]

@@ -87,6 +87,31 @@ def _next_output_path(name: str) -> Path:
     return OUTPUT_DIR / f"{name}-{n}.json"
 
 
+def resolve_corpus_path(target: str) -> Path | None:
+    """Resolve a target to a parsed corpus file in output/.
+
+    Prefers output/<target>.json; otherwise the highest-N file from the
+    output/<target>-<N>.json scheme written by run(). None if nothing matches.
+    """
+    direct = OUTPUT_DIR / f"{target}.json"
+    if direct.is_file():
+        return direct
+    numbered: list[tuple[int, Path]] = []
+    for path in OUTPUT_DIR.glob(f"{target}-*.json"):
+        suffix = path.stem[len(target) + 1:]
+        if suffix.isdigit():
+            numbered.append((int(suffix), path))
+    return max(numbered)[1] if numbered else None
+
+
+def load_records(target: str) -> tuple[list[dict], Path]:
+    """Load the parsed verse records for a target. Returns (records, source_path)."""
+    path = resolve_corpus_path(target)
+    if path is None:
+        raise FileNotFoundError(OUTPUT_DIR / f"{target}.json")
+    return json.loads(path.read_text(encoding="utf-8")), path
+
+
 def run(target: str) -> int:
     """Read data/<target>.txt, normalize, and write output/<target>-<N>.json."""
     target_path = DATA_DIR / f"{target}.txt"
