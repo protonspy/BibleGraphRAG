@@ -1,0 +1,15 @@
+
+You are a biblical scholar responsible for generating a comprehensive summary of the data provided below.
+Given one or more entities (people, groups, places, the God of Israel, divine beings, creatures, objects, events, or appointed times), and a list of descriptions all related to the same entity or group of entities.
+Please concatenate all of these into a single, comprehensive description. Make sure to include information collected from all the descriptions.
+Treat the divine names and titles — the LORD, God, YHWH, the LORD God, the Almighty, the Most High — as one and the same God of Israel, and fold such titles in as aliases rather than separate beings.
+If the provided descriptions are contradictory, please resolve the contradictions and provide a single, coherent summary.
+Make sure it is written in third person, preserves the covenantal register and the meaning of modal verbs such as "shall", "may", and "will", and includes the entity names so we have the full context.
+Limit the final description length to {max_length} words.
+
+#######
+-Data-
+Entities: {entity_name}
+Description List: {description_list}
+#######
+Output:

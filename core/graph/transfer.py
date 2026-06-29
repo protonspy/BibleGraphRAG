@@ -1,13 +1,13 @@
 """Export/import the Neo4j graph as JSON — a lossless, schema-agnostic dump.
 
-`export` reads the whole graph (or one --group-id namespace) into export/<name>-<N>.json;
-`import` MERGEs that JSON back into Neo4j keyed by each node/edge `uuid`. Both run on the
-raw Neo4j driver (no Graphiti/LLM stack) — this is backup/restore, not ingestion.
+`export` reads the whole graph into export/<name>-<N>.json; `import` MERGEs that JSON back into
+Neo4j keyed by each node/edge `id`. Both run on the raw Neo4j driver (no GraphRAG/LLM stack) —
+this is backup/restore of the loaded mirror (see core.graph.load_neo4j), not ingestion.
 
-The dump is deliberately generic — `MATCH (n)` / `MATCH (a)-[r]->(b)` rather than a fixed
-label list — so it survives Graphiti schema growth (Saga, Community, NEXT_EPISODE all come
-for free). The only Graphiti-specific knowledge is that every node carries a stable `uuid`
-(the join key) and which property names hold temporal values.
+The dump is deliberately generic — `MATCH (n)` / `MATCH (a)-[r]->(b)` rather than a fixed label
+list — so it survives schema growth. The only assumption is that every node carries a stable `id`
+(the GraphRAG entity/community/document/chunk id) used as the join key. Structural edges without an
+id (PART_OF / HAS_ENTITY / IN_COMMUNITY) are matched on their endpoints + type instead.
 
 Conventions mirror the parser: files live under export/, numbered <name>-<N>.json and never
 overwritten on export; import resolves export/<name>.json or the highest-N file.
@@ -25,14 +25,14 @@ from neo4j import GraphDatabase
 from neo4j.time import Date, DateTime, Time
 
 from core.config import env
-from core.graph.client import quiet_neo4j_logging
+from core.graph.neo4j_util import quiet_neo4j_logging
 
 EXPORT_DIR = Path("export")
 
-# Graphiti property names that hold temporal values. Neo4j returns these as
-# neo4j.time.DateTime; we emit ISO-8601 strings and convert them back to Python datetimes on
-# import so Graphiti's datetime comparisons keep working (a plain string would break them).
-TEMPORAL_KEYS = {"created_at", "valid_at", "invalid_at", "expired_at", "reference_time"}
+# GraphRAG writes dates (documents.creation_date, communities.period) as plain ISO strings, not
+# Neo4j temporal types, so nothing needs reviving on import. Kept empty (rather than deleted) so the
+# generic _to_jsonable/_restore_value round-trip stays in place if a temporal property is ever added.
+TEMPORAL_KEYS: set[str] = set()
 
 # Label / relationship-type names are injected into Cypher (they can't be parameterized), so
 # they must be plain identifiers — guards against a tampered export file injecting Cypher.
@@ -132,23 +132,23 @@ def export_run(
         with driver.session() as sess:
             for r in sess.run(
                 f"MATCH (n) {node_where} " # type: ignore
-                "RETURN n.uuid AS uuid, labels(n) AS labels, properties(n) AS props",
+                "RETURN n.id AS id, labels(n) AS labels, properties(n) AS props",
                 gid=group_id,
             ):
-                uuid = r["uuid"]
-                if uuid is None:  # every Graphiti node has one; skip anything that doesn't
+                node_id = r["id"]
+                if node_id is None:  # every GraphRAG-loaded node has one; skip anything that doesn't
                     skipped_nodes += 1
                     continue
                 nodes.append({
-                    "uuid": uuid,
+                    "id": node_id,
                     "labels": r["labels"],
                     "properties": _clean_props(r["props"], embeddings),
                 })
-                node_ids.add(uuid)
+                node_ids.add(node_id)
 
             for r in sess.run(
                 f"MATCH (a)-[r]->(b) {rel_where} " # type: ignore
-                "RETURN type(r) AS type, r.uuid AS uuid, a.uuid AS start, b.uuid AS end, "
+                "RETURN type(r) AS type, r.id AS id, a.id AS start, b.id AS end, "
                 "properties(r) AS props",
                 gid=group_id,
             ):
@@ -157,7 +157,7 @@ def export_run(
                     dangling_rels += 1  # endpoint outside the exported scope
                     continue
                 relationships.append({
-                    "uuid": r["uuid"],
+                    "id": r["id"],
                     "type": r["type"],
                     "start": start,
                     "end": end,
@@ -168,7 +168,7 @@ def export_run(
 
     scope = f"group_id '{group_id}'" if group_id else "whole graph"
     if skipped_nodes:
-        print(f"warning: skipped {skipped_nodes} node(s) without a uuid", file=sys.stderr)
+        print(f"warning: skipped {skipped_nodes} node(s) without an id", file=sys.stderr)
     if dangling_rels:
         print(f"warning: skipped {dangling_rels} relationship(s) crossing the export scope",
               file=sys.stderr)
@@ -207,27 +207,27 @@ def _group_nodes(nodes: list[dict]) -> dict[tuple[str, ...], list[dict]]:
     for node in nodes:
         labels = tuple(_validate_ident(l) for l in node.get("labels", []))
         props = {k: _restore_value(k, v) for k, v in node["properties"].items()}
-        buckets.setdefault(labels, []).append({"uuid": node["uuid"], "props": props}) # type: ignore
+        buckets.setdefault(labels, []).append({"id": node["id"], "props": props}) # type: ignore
     return buckets
 
 
 def _group_rels(rels: list[dict]) -> dict[tuple[str, bool], list[dict]]:
-    """Bucket relationships by (validated type, has-uuid) — type can't be parameterized."""
+    """Bucket relationships by (validated type, has-id) — type can't be parameterized."""
     buckets: dict[tuple[str, bool], list[dict]] = {}
     for rel in rels:
         rtype = _validate_ident(rel["type"])
         props = {k: _restore_value(k, v) for k, v in rel["properties"].items()}
-        row = {"uuid": rel.get("uuid"), "start": rel["start"], "end": rel["end"], "props": props}
-        buckets.setdefault((rtype, rel.get("uuid") is not None), []).append(row) # type: ignore
+        row = {"id": rel.get("id"), "start": rel["start"], "end": rel["end"], "props": props}
+        buckets.setdefault((rtype, rel.get("id") is not None), []).append(row) # type: ignore
     return buckets
 
 
 def import_run(target: str, wipe: bool = False, dry_run: bool = False) -> int:
-    """Load export/<target>[-N].json into Neo4j, upserting nodes/edges by uuid."""
+    """Load export/<target>[-N].json into Neo4j, upserting nodes/edges by id."""
     path = _resolve_export_path(target)
     if path is None:
         print(f"error: export not found: {EXPORT_DIR / (target + '.json')} "
-              f"(run `bgr neo4j export --target {target}` first)", file=sys.stderr)
+              f"(run `bgr transfer export --target {target}` first)", file=sys.stderr)
         return 1
 
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -264,25 +264,25 @@ def import_run(target: str, wipe: bool = False, dry_run: bool = False) -> int:
                     deleted = sess.run("MATCH (n) DETACH DELETE n RETURN count(n) AS c").single()["c"]
                 print(f"wiped {deleted} nodes ({wipe_scope})", file=sys.stderr)
 
-            # Nodes: MERGE on uuid only (stable across label changes), then overwrite props
-            # and re-apply the label set. Labels are static per bucket, so this is injection-safe.
+            # Nodes: MERGE on id only (stable across label changes), then overwrite props and
+            # re-apply the label set. Labels are static per bucket, so this is injection-safe.
             for labels, rows in node_buckets.items():
                 label_clause = f" SET x{''.join(f':{l}' for l in labels)}" if labels else ""
                 sess.run(
                     "UNWIND $rows AS row " # type: ignore
-                    "MERGE (x {uuid: row.uuid}) "
+                    "MERGE (x {id: row.id}) "
                     "SET x = row.props" + label_clause,
                     rows=rows,
                 )
 
-            # Relationships: edges with a uuid MERGE on it; structural edges (no uuid) MERGE
-            # on endpoints + type. Both then overwrite properties.
-            for (rtype, has_uuid), rows in rel_buckets.items():
-                merge = (f"MERGE (a)-[e:{rtype} {{uuid: row.uuid}}]->(b)" if has_uuid
+            # Relationships: edges with an id MERGE on it; structural edges (no id) MERGE on
+            # endpoints + type. Both then overwrite properties.
+            for (rtype, has_id), rows in rel_buckets.items():
+                merge = (f"MERGE (a)-[e:{rtype} {{id: row.id}}]->(b)" if has_id
                          else f"MERGE (a)-[e:{rtype}]->(b)")
                 sess.run(
                     "UNWIND $rows AS row " # type: ignore
-                    "MATCH (a {uuid: row.start}), (b {uuid: row.end}) "
+                    "MATCH (a {id: row.start}), (b {id: row.end}) "
                     f"{merge} "
                     "SET e = row.props",
                     rows=rows,

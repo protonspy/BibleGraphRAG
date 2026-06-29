@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
+
+from core.config import env
 
 from core.cost import estimate as estimate_step
 from core.graph import build as build_step
 from core.graph import inspect as inspect_step
+from core.graph import query as query_step
 from core.graph import transfer as transfer_step
 from core.pipe import parser as parser_step
 from core.pipe import pericope as pericope_step
@@ -76,35 +80,32 @@ def build_parser() -> argparse.ArgumentParser:
         dry_run=args.dry_run,
     ))
 
-    p_build = sub.add_parser("build", help="Ingest a parsed corpus into the Graphiti knowledge graph")
+    p_build = sub.add_parser("build", help="Build the GraphRAG index from a parsed corpus and load it into Neo4j")
     p_build.add_argument("--target", required=True, help="Corpus name, resolved to output/<name>[-N].json")
-    p_build.add_argument("--book", default=None, help="Only ingest this book (e.g. Genesis)")
+    p_build.add_argument("--book", default=None, help="Only include this book (e.g. Genesis)")
     build_ch = p_build.add_mutually_exclusive_group()
-    build_ch.add_argument("--chapter", type=int, default=None, help="Only ingest this chapter number")
-    build_ch.add_argument("--chapters", default=None, help="Only ingest these chapters: '1-3', '1,3', '1-3,5'")
-    p_build.add_argument("--limit", type=int, default=None, help="Cap the number of episodes")
-    p_build.add_argument("--group-id", default=None, help="Graph namespace (default: translation name)")
+    build_ch.add_argument("--chapter", type=int, default=None, help="Only include this chapter number")
+    build_ch.add_argument("--chapters", default=None, help="Only include these chapters: '1-3', '1,3', '1-3,5'")
+    p_build.add_argument("--limit", type=int, default=None, help="Cap the number of documents (pericopes/chapters)")
     p_build.add_argument("--no-pericope", dest="pericope", action="store_false", default=True,
-                         help="Ingest one episode per chapter (default: per pericope, LLM-segmented and cached on demand)")
-    p_build.add_argument("--no-enrich", dest="enrich", action="store_false", default=True,
-                         help="Skip per-episode LLM extraction-guidance enrichment (default: on, cached)")
-    p_build.add_argument("--dry-run", action="store_true", help="Show the ingestion plan without calling Neo4j/LLM")
-    resume_grp = p_build.add_mutually_exclusive_group()
-    resume_grp.add_argument("--resume", dest="resume", action="store_true", default=None,
-                            help="Skip episodes already in the group, no prompt (resume an interrupted run)")
-    resume_grp.add_argument("--no-resume", dest="resume", action="store_false", default=None,
-                            help="Re-ingest every selected episode, ignoring existing nodes (no prompt)")
+                         help="One document per chapter (default: per pericope, LLM-segmented and cached on demand)")
+    p_build.add_argument("--skip-index", action="store_true",
+                         help="Only prepare the input CSV; don't run `graphrag index`")
+    p_build.add_argument("--skip-load", action="store_true",
+                         help="Stop after indexing; don't load the parquet output into Neo4j")
+    p_build.add_argument("--verbose", action="store_true", help="Verbose `graphrag index` output")
+    p_build.add_argument("--dry-run", action="store_true", help="Show the plan without calling the LLM/GraphRAG/Neo4j")
     p_build.set_defaults(handler=lambda args: build_step.run(
         args.target,
         book=args.book,
         chapter=args.chapter,
         chapters=_parse_chapters(args.chapters),
         limit=args.limit,
-        group_id=args.group_id,
         dry_run=args.dry_run,
         pericope=args.pericope,
-        resume=args.resume,
-        enrich=args.enrich,
+        skip_index=args.skip_index,
+        skip_load=args.skip_load,
+        verbose=args.verbose,
     ))
 
     p_transfer = sub.add_parser("transfer", help="Export/import the Neo4j graph as JSON (backup/restore)")
@@ -112,13 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_export = transfer_sub.add_parser("export", help="Dump the graph to export/<name>-<N>.json")
     p_export.add_argument("--target", required=True, help="Output name, resolved to export/<name>-<N>.json")
-    p_export.add_argument("--group-id", default=None, help="Only export this graph namespace (default: whole graph)")
     p_export.add_argument("--no-embeddings", action="store_true",
-                          help="Strip *_embedding vectors (smaller file; search needs re-embedding after import)")
+                          help="Strip any *_embedding vectors from the dump (smaller file)")
     p_export.add_argument("--dry-run", action="store_true", help="Show what would be exported without writing a file")
     p_export.set_defaults(handler=lambda args: transfer_step.export_run(
         args.target,
-        group_id=args.group_id,
         embeddings=not args.no_embeddings,
         dry_run=args.dry_run,
     ))
@@ -134,14 +133,39 @@ def build_parser() -> argparse.ArgumentParser:
         dry_run=args.dry_run,
     ))
 
-    p_inspect = sub.add_parser("inspect", help="Show extracted entities and relationships for validation")
-    p_inspect.add_argument("--group-id", default=None, help="Limit to a graph namespace (default: all)")
-    p_inspect.add_argument("--limit", type=int, default=30, help="Max entities/relationships to list")
-    p_inspect.set_defaults(handler=lambda args: inspect_step.run(group_id=args.group_id, limit=args.limit))
+    p_inspect = sub.add_parser("inspect", help="Show the loaded graph: entities, relationships, communities")
+    p_inspect.add_argument("--limit", type=int, default=30, help="Max entities/relationships/communities to list")
+    p_inspect.set_defaults(handler=lambda args: inspect_step.run(limit=args.limit))
+
+    p_query = sub.add_parser("query", help="Query the graph in Neo4j (global / local search)")
+    p_query.add_argument("question", help="The question to ask the graph")
+    p_query.add_argument("--method", "-m", default="global", choices=list(query_step.METHODS),
+                         help="global = sensemaking over community reports; local = entity vector search + neighbourhood")
+    p_query.add_argument("--community-level", type=int, default=None,
+                         help="Max Leiden level of community reports to use (global search)")
+    p_query.add_argument("--response-type", default=None,
+                         help="Free-form response shape, e.g. 'single paragraph', 'bullet points'")
+    p_query.add_argument("--verbose", action="store_true",
+                         help="Per-report (global) / per-entity (local) progress detail on stderr")
+    p_query.set_defaults(handler=lambda args: query_step.run(
+        args.question,
+        method=args.method,
+        community_level=args.community_level,
+        response_type=args.response_type,
+        verbose=args.verbose,
+    ))
 
     return cli
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.handler(args)
+    # The Neo4j-backed steps (build --no-skip-load, inspect, transfer) surface a noisy driver
+    # traceback when the database is down or credentials are wrong; turn that into a one-line hint.
+    from neo4j.exceptions import AuthError, ServiceUnavailable
+    try:
+        return args.handler(args)
+    except (ServiceUnavailable, AuthError) as exc:
+        print(f"error: Neo4j unavailable at {env.neo4j_uri}: {exc}\n"
+              f"  start it (docker compose up -d) and check NEO4J_* in .env", file=sys.stderr)
+        return 1

@@ -1,0 +1,152 @@
+### This config file contains required core defaults that must be set, along with a handful of common optional settings.
+### For a full list of available settings, see https://microsoft.github.io/graphrag/config/yaml/
+
+### LLM settings ###
+## There are a number of settings to tune the threading and token limits for LLM calls - check the docs.
+
+# Both models route through OpenRouter (OpenAI-compatible chat + embeddings). litellm runs
+# under the hood; provider `openai` + an explicit api_base points the client at OpenRouter.
+# The env-var placeholders below are injected by `bgr build` from the repo .env
+# (core.config.Settings) — the single source of truth for secrets. Running the graphrag CLI
+# directly requires those variables to be present in the environment.
+completion_models:
+  default_completion_model:
+    model_provider: openai
+    model: ${GRAPHRAG_LLM_MODEL}
+    api_base: ${OPENAI_BASE_URL}
+    auth_method: api_key # or azure_managed_identity
+    api_key: ${OPENAI_API_KEY}
+    retry:
+      type: exponential_backoff
+
+embedding_models:
+  default_embedding_model:
+    model_provider: openai
+    model: ${GRAPHRAG_EMBEDDING_MODEL}
+    api_base: ${GRAPHRAG_EMBED_BASE_URL}
+    auth_method: api_key
+    api_key: ${GRAPHRAG_EMBED_API_KEY}
+    retry:
+      type: exponential_backoff
+
+### Document processing settings ###
+
+input:
+  type: csv # one row per pericope, written by `bgr build` (core.graph.episodes)
+  file_pattern: ".*\\.csv"   # no regex end-anchor: graphrag runs string.Template over this file, treating the dollar sign as an env-var placeholder
+  text_column: text
+  id_column: id        # stable ref, e.g. "Genesis 2:4-25" — idempotent for `graphrag update`
+  title_column: title
+
+chunking:
+  type: tokens
+  size: 1200
+  overlap: 100
+  encoding_model: o200k_base
+  # Each pericope is its own document, so chunking never bleeds across pericopes; small
+  # pericopes (3-25 verses) stay a single chunk. Prepend book/chapter to every chunk so the
+  # extractor knows the locus (helps Deity-vs-DivineBeing and coreference). Columns are read
+  # from the CSV row (kept in the document's raw_data).
+  prepend_metadata: [book, chapter]
+
+### Storage settings ###
+## If blob storage is specified in the following four sections,
+## connection_string and container_name must be provided
+
+input_storage:
+  type: file # [file, blob, cosmosdb]
+  base_dir: "input"
+
+output_storage:
+  type: file # [file, blob, cosmosdb]
+  base_dir: "output"
+
+reporting:
+  type: file # [file, blob]
+  base_dir: "logs"
+
+cache:
+  type: json # [json, memory, none]
+  storage:
+    type: file # [file, blob, cosmosdb]
+    base_dir: "cache"
+    
+vector_store:
+  # Custom backend registered by core.graph.neo4j_vectors (register_vector_store). The embedding
+  # workflow writes vectors straight into Neo4j nodes instead of lancedb; connection comes from .env.
+  type: neo4j
+  vector_size: 1536   # matches EMBEDDING_DIM — the Neo4j vector index dimension
+
+### Workflow settings ###
+
+embed_text:
+  embedding_model_id: default_embedding_model
+  # Only entity embeddings — what core.graph.search.local_search needs. Keyed by id onto __Entity__.
+  # (text_unit_text / community_full_content would also work but aren't used by our query layer.)
+  names: [entity_description]
+
+extract_graph:
+  completion_model_id: default_completion_model
+  prompt: "prompts/extract_graph.txt"
+  # Flat type list derived from the former typed ontology (core/graph/entities.py). The
+  # disambiguations that lived in the Pydantic docstrings now live in the extraction prompt
+  # (re-tune with `graphrag prompt-tune --root rag`). Relationships are free-text descriptions
+  # here — the old controlled predicate vocabulary has no native GraphRAG equivalent.
+  entity_types: [person, group, place, deity, divine_being, creature, plant, artifact, event, time_period, title]
+  max_gleanings: 1
+
+summarize_descriptions:
+  completion_model_id: default_completion_model
+  prompt: "prompts/summarize_descriptions.txt"
+  max_length: 500
+
+extract_graph_nlp:
+  text_analyzer:
+    extractor_type: regex_english # [regex_english, syntactic_parser, cfg]
+
+cluster_graph:
+  max_cluster_size: 10
+
+extract_claims:
+  enabled: false
+  completion_model_id: default_completion_model
+  prompt: "prompts/extract_claims.txt"
+  description: "Any claims or facts that could be relevant to information discovery."
+  max_gleanings: 1
+
+community_reports:
+  completion_model_id: default_completion_model
+  graph_prompt: "prompts/community_report_graph.txt"
+  text_prompt: "prompts/community_report_text.txt"
+  max_length: 2000
+  max_input_length: 8000
+
+snapshots:
+  graphml: false
+  embeddings: false
+
+### Query settings ###
+## The prompt locations are required here, but each search method has a number of optional knobs that can be tuned.
+## See the config docs: https://microsoft.github.io/graphrag/config/yaml/#query
+
+local_search:
+  completion_model_id: default_completion_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/local_search_system_prompt.txt"
+
+global_search:
+  completion_model_id: default_completion_model
+  map_prompt: "prompts/global_search_map_system_prompt.txt"
+  reduce_prompt: "prompts/global_search_reduce_system_prompt.txt"
+  knowledge_prompt: "prompts/global_search_knowledge_system_prompt.txt"
+
+drift_search:
+  completion_model_id: default_completion_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/drift_search_system_prompt.txt"
+  reduce_prompt: "prompts/drift_search_reduce_prompt.txt"
+
+basic_search:
+  completion_model_id: default_completion_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/basic_search_system_prompt.txt"

@@ -1,9 +1,17 @@
-"""Turn parsed verse records into Graphiti episodes — one episode per chapter."""
+"""Turn parsed verse records into GraphRAG input rows — one document per pericope (or chapter).
+
+An "episode" here is a contiguous unit of text (a pericope, or a whole chapter with --no-pericope).
+`build_graphrag_input` serializes the selected episodes into the CSV that `graphrag index` reads,
+one row per episode. Because GraphRAG chunks each document independently, one-pericope-per-row
+keeps extraction focused and prevents bleed across pericope boundaries.
+"""
 from __future__ import annotations
 
+import csv
 import re
 from dataclasses import dataclass
 from itertools import groupby
+from pathlib import Path
 
 # Trailing "-N" that the parser appends to output filenames (akjv-1 -> akjv).
 _VERSION_SUFFIX = re.compile(r"-\d+$")
@@ -16,12 +24,12 @@ def translation_label(stem: str) -> str:
 
 @dataclass(frozen=True)
 class Episode:
-    """A chapter's worth of verses, ready for Graphiti.add_episode."""
+    """One contiguous unit of text (a pericope or a whole chapter) → one GraphRAG input row."""
 
-    name: str                 # "Genesis 1"
+    name: str                 # stable reference / document id, e.g. "Genesis 1" or "Genesis 2:4-25"
     body: str                 # one verse per line, prefixed with its number
-    source_description: str   # "akjv — Genesis 1"
-    index: int                # canonical position, for deterministic reference_time
+    source_description: str   # "akjv — Genesis 1" (becomes the document title)
+    index: int                # canonical position (kept for ordering / future use)
     book: str
     chapter: int
     verses: int
@@ -90,3 +98,32 @@ def build_pericope_episodes(
                 )
             )
     return episodes
+
+
+# Column order matches rag/settings.yaml: id_column=id, title_column=title, text_column=text;
+# book/chapter feed chunking.prepend_metadata so every chunk carries its locus.
+GRAPHRAG_INPUT_COLUMNS = ["id", "title", "text", "book", "chapter"]
+
+
+def build_graphrag_input(episodes: list[Episode], translation: str, rag_root: Path) -> Path:
+    """Write the selected episodes to <rag_root>/input/<translation>.csv (one row per episode).
+
+    Returns the path written. Overwrites any existing file for this translation, so the CSV always
+    reflects the current selection; `id` is the stable episode name, which keeps `graphrag update`
+    idempotent across re-runs. The csv module handles quoting of commas/quotes/newlines in verse text.
+    """
+    input_dir = rag_root / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    out_path = input_dir / f"{translation}.csv"
+    with out_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=GRAPHRAG_INPUT_COLUMNS)
+        writer.writeheader()
+        for e in episodes:
+            writer.writerow({
+                "id": e.name,
+                "title": e.source_description,
+                "text": e.body,
+                "book": e.book,
+                "chapter": e.chapter,
+            })
+    return out_path

@@ -221,3 +221,15 @@ data/*.txt
 output/*.json
 export/*.json
 cache/*.json
+
+# GraphRAG workspace: settings.yaml and prompts/ are tracked; everything generated is not.
+rag/input/
+rag/output/
+rag/cache/
+rag/logs/
+
+# Local reference clone of the GraphRAG source (installed from PyPI; not vendored)
+graphrag/
+
+# JetBrains / PyCharm
+.idea/

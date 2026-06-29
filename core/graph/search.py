@@ -1,0 +1,162 @@
+"""Answer questions with the GraphRAG query engine (global / local search).
+
+`bgr build` indexes the corpus to <rag_root>/output/*.parquet; these functions load those tables and
+run GraphRAG's own search engine over them (graphrag.api) — the same engine, prompts, and context
+builders GraphRAG ships, not a reimplementation. The entity-description embeddings live in Neo4j
+(our Neo4jVectorStore; rag/settings.yaml sets vector_store.type=neo4j), so local search seeds from
+the Neo4j vector index — no lancedb at query time.
+
+The answer streams to stdout token-by-token; map/reduce and context progress go to stderr via a
+QueryCallbacks hook (kept off stdout so the answer stays pipe-clean). GraphRAG's load_config chdir's
+into rag_root and the search prompts are read relative to that cwd, so each call wraps the run in a
+chdir/restore (mirrors core.graph.engine.index). Neo4j must be running and the index built.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import time
+from pathlib import Path
+
+import pandas as pd
+
+from core.config import env
+from core.graph.engine import _load_config
+from core.graph.neo4j_vectors import register_neo4j_vector_store
+
+
+# --- progress feedback (to stderr; the streamed answer owns stdout) ----------------------
+
+def _note(msg: str) -> None:
+    """Emit one progress line to stderr so the answer streamed on stdout stays clean."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _make_callbacks(verbose: bool):
+    """A QueryCallbacks that narrates the map/reduce phases on stderr (global search)."""
+    from graphrag.callbacks.query_callbacks import QueryCallbacks
+
+    class _Progress(QueryCallbacks):
+        def on_context(self, context) -> None:
+            if verbose:
+                _note("[graphrag] context assembled")
+
+        def on_map_response_start(self, map_response_contexts) -> None:
+            _note(f"[graphrag] map: {len(map_response_contexts)} report batch(es)…")
+
+        def on_map_response_end(self, map_response_outputs) -> None:
+            _note(f"[graphrag] map: done ({len(map_response_outputs)} batch(es))")
+
+        def on_reduce_response_start(self, reduce_response_context) -> None:
+            _note("[graphrag] reduce: synthesizing the answer…")
+
+    return [_Progress()]
+
+
+# --- parquet loading ---------------------------------------------------------------------
+
+def _load_outputs(required: list[str], optional: tuple[str, ...] = ()) -> dict | None:
+    """Read the GraphRAG output tables a query needs from <rag_root>/output (None if missing)."""
+    output_dir = Path(env.rag_root) / "output"
+    missing = [t for t in required if not (output_dir / f"{t}.parquet").is_file()]
+    if missing:
+        _note(f"error: GraphRAG index not found in {output_dir} (missing "
+              f"{', '.join(missing)}); run `bgr build` first.")
+        return None
+    tables: dict[str, pd.DataFrame | None] = {
+        t: pd.read_parquet(output_dir / f"{t}.parquet") for t in required
+    }
+    for t in optional:  # e.g. covariates — absent when claims are disabled
+        p = output_dir / f"{t}.parquet"
+        tables[t] = pd.read_parquet(p) if p.is_file() else None
+    return tables
+
+
+async def _stream(agen) -> str:
+    """Drain a GraphRAG *_search_streaming async generator to stdout, returning the full text."""
+    full = ""
+    async for chunk in agen:
+        full += chunk
+        print(chunk, end="", flush=True)
+    print()  # close the streamed line
+    return full
+
+
+def _run(coro_factory) -> str:
+    """Load the config (chdir's into rag_root for prompt paths), run the async query, restore cwd."""
+    cwd = os.getcwd()
+    try:
+        config = _load_config()
+        return asyncio.run(coro_factory(config))
+    finally:
+        os.chdir(cwd)
+
+
+# --- global search: map-reduce over community reports (GraphRAG engine) ------------------
+
+def global_search(query: str, level: int = 2, response_type: str = "Multiple Paragraphs",
+                  verbose: bool = False) -> str:
+    """Map-reduce over the community reports with GraphRAG's global search engine."""
+    tables = _load_outputs(["entities", "communities", "community_reports"])
+    if tables is None:
+        return ""
+    started = time.perf_counter()
+    _note(f"[graphrag/global] community level ≤ {level} · {len(tables['community_reports'])} reports")
+
+    async def go(config):
+        import graphrag.api as api
+        return await _stream(api.global_search_streaming(
+            config=config,
+            entities=tables["entities"],
+            communities=tables["communities"],
+            community_reports=tables["community_reports"],
+            community_level=level,
+            dynamic_community_selection=False,
+            response_type=response_type,
+            query=query,
+            callbacks=_make_callbacks(verbose),
+            verbose=verbose,
+        ))
+
+    answer = _run(go)
+    _note(f"[graphrag/global] done ({time.perf_counter() - started:.1f}s)")
+    return answer
+
+
+# --- local search: entity vector search + neighbourhood (GraphRAG engine) ----------------
+
+def local_search(query: str, level: int = 2, response_type: str = "Multiple Paragraphs",
+                 verbose: bool = False) -> str:
+    """Seed on entities most similar to the query (Neo4j vector index), expand, then synthesize."""
+    tables = _load_outputs(
+        ["communities", "community_reports", "text_units", "relationships", "entities"],
+        optional=("covariates",),
+    )
+    if tables is None:
+        return ""
+    # Resolve the entity-description embedding store to our Neo4j vector index (not lancedb).
+    register_neo4j_vector_store()
+    started = time.perf_counter()
+    _note(f"[graphrag/local] vector search over {len(tables['entities'])} entities + neighbourhood…")
+
+    async def go(config):
+        import graphrag.api as api
+        return await _stream(api.local_search_streaming(
+            config=config,
+            entities=tables["entities"],
+            communities=tables["communities"],
+            community_reports=tables["community_reports"],
+            text_units=tables["text_units"],
+            relationships=tables["relationships"],
+            covariates=tables["covariates"],
+            community_level=level,
+            response_type=response_type,
+            query=query,
+            callbacks=_make_callbacks(verbose),
+            verbose=verbose,
+        ))
+
+    answer = _run(go)
+    _note(f"[graphrag/local] done ({time.perf_counter() - started:.1f}s)")
+    return answer

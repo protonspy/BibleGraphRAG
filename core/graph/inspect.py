@@ -1,68 +1,62 @@
-"""Inspect an ingested graph — entity/relationship counts and samples for validation."""
+"""Inspect a loaded GraphRAG graph in Neo4j — counts and samples for validation.
+
+Reads the schema written by core.graph.load_neo4j (__Entity__ / __Chunk__ / __Document__ /
+__Community__, related by RELATED / HAS_ENTITY / PART_OF / IN_COMMUNITY). An empty graph just
+prints zeros — run `bgr build` (without --skip-load) to populate it.
+"""
 from __future__ import annotations
 
-from neo4j import GraphDatabase
-
-from core.config import env
-from core.graph.client import quiet_neo4j_logging
+from core.graph.neo4j_util import quiet_neo4j_logging, session
 
 
-def run(group_id: str | None = None, limit: int = 30) -> int:
-    """Print typed-entity counts, entity names, and extracted relationships."""
+def run(limit: int = 30) -> int:
+    """Print node/edge counts, entities by type, and samples of entities, relations, communities."""
     quiet_neo4j_logging()
-    gid_clause = "WHERE n.group_id = $gid" if group_id else ""
-    edge_clause = "WHERE e.group_id = $gid" if group_id else ""
-    params = {"gid": group_id, "limit": limit}
+    with session() as sess:
+        print("Graph inspection (GraphRAG → Neo4j)")
 
-    driver = GraphDatabase.driver(env.neo4j_uri, auth=(env.neo4j_user, env.neo4j_password))
-    try:
-        with driver.session() as sess:
-            scope = f"group_id '{group_id}'" if group_id else "all groups"
-            print(f"Graph inspection ({scope})")
+        def count(cypher: str) -> int:
+            return sess.run(cypher).single()[0]
 
-            total = sess.run(f"MATCH (n:Entity) {gid_clause} RETURN count(n) AS c", params).single()["c"]
-            edges = sess.run(f"MATCH ()-[e:RELATES_TO]->() {edge_clause} RETURN count(e) AS c", params).single()["c"]
-            episodes = sess.run(
-                f"MATCH (n:Episodic) {gid_clause} RETURN count(n) AS c", params
-            ).single()["c"]
-            print(f"  episodes: {episodes}   entities: {total}   relationships: {edges}")
+        docs = count("MATCH (d:__Document__) RETURN count(d)")
+        chunks = count("MATCH (c:__Chunk__) RETURN count(c)")
+        ents = count("MATCH (e:__Entity__) RETURN count(e)")
+        edges = count("MATCH ()-[r:RELATED]->() RETURN count(r)")
+        coms = count("MATCH (k:__Community__) RETURN count(k)")
+        print(f"  documents: {docs}   chunks: {chunks}   entities: {ents}   "
+              f"relationships: {edges}   communities: {coms}")
 
-            print("\nEntities by type:")
-            rows = sess.run(
-                f"""MATCH (n:Entity) {gid_clause}
-                    UNWIND labels(n) AS lbl
-                    WITH lbl, count(DISTINCT n) AS c WHERE lbl <> 'Entity'
-                    RETURN lbl, c ORDER BY c DESC""",
-                params,
-            )
-            typed = list(rows)
-            for r in typed:
-                print(f"  {r['lbl']:10} {r['c']}")
-            if not typed:
-                print("  (none typed)")
+        print("\nEntities by type:")
+        rows = list(sess.run(
+            "MATCH (e:__Entity__) WHERE e.type IS NOT NULL "
+            "RETURN e.type AS type, count(*) AS c ORDER BY c DESC"))
+        for r in rows:
+            print(f"  {r['type']:14} {r['c']}")
+        if not rows:
+            print("  (none)")
 
-            print(f"\nEntities (up to {limit}):")
-            rows = sess.run(
-                f"""MATCH (n:Entity) {gid_clause}
-                    RETURN n.name AS name, [l IN labels(n) WHERE l <> 'Entity'] AS types
-                    ORDER BY name LIMIT $limit""",
-                params,
-            )
-            for r in rows:
-                tag = f"  [{', '.join(r['types'])}]" if r["types"] else ""
-                print(f"  {r['name']}{tag}")
+        print(f"\nEntities (up to {limit}):")
+        for r in sess.run(
+            "MATCH (e:__Entity__) RETURN e.name AS name, e.type AS type "
+            "ORDER BY e.name LIMIT $limit", limit=limit):
+            tag = f"  [{r['type']}]" if r["type"] else ""
+            print(f"  {r['name']}{tag}")
 
-            print(f"\nRelationships (up to {limit}):")
-            rows = sess.run(
-                f"""MATCH (a:Entity)-[e:RELATES_TO]->(b:Entity) {edge_clause}
-                    RETURN a.name AS src, e.name AS rel, b.name AS tgt, e.fact AS fact
-                    ORDER BY src LIMIT $limit""",
-                params,
-            )
-            for r in rows:
-                print(f"  ({r['src']}) -[{r['rel']}]-> ({r['tgt']})")
-                if r["fact"]:
-                    print(f"      \"{r['fact']}\"")
-    finally:
-        driver.close()
+        print(f"\nRelationships (up to {limit}, strongest first):")
+        for r in sess.run(
+            "MATCH (a:__Entity__)-[r:RELATED]->(b:__Entity__) "
+            "RETURN a.name AS src, b.name AS tgt, r.description AS desc, r.weight AS w "
+            "ORDER BY w DESC LIMIT $limit", limit=limit):
+            print(f"  ({r['src']}) -[RELATED]-> ({r['tgt']})")
+            if r["desc"]:
+                print(f"      \"{r['desc']}\"")
+
+        print(f"\nCommunities (up to {limit}):")
+        for r in sess.run(
+            "MATCH (k:__Community__) "
+            "RETURN k.community AS id, k.level AS level, "
+            "       coalesce(k.report_title, k.title) AS title, k.rank AS rank "
+            "ORDER BY k.level, k.community LIMIT $limit", limit=limit):
+            rank = f" (rank {r['rank']})" if r["rank"] is not None else ""
+            print(f"  [L{r['level']}] #{r['id']} {r['title']}{rank}")
     return 0

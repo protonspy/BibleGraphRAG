@@ -1,10 +1,10 @@
 """Pericope segmentation step — group a chapter's verses into semantic units via LLM.
 
-A whole chapter is too large a unit for one Graphiti extraction pass: entities and
+A whole chapter is too large a unit for one GraphRAG extraction pass: entities and
 relations get dropped, and coreference ("the tree in the midst of the garden") resolves to
 the wrong referent across that much text. This step asks an LLM to split each chapter into
 *pericopes* — contiguous verse ranges that form a single narrative or teaching unit — so
-`build` can ingest one small, focused episode per pericope instead of one per chapter.
+`build` can feed one small, focused document per pericope instead of one per chapter.
 
 Boundaries are cached in cache/<translation>-pericopes.json; segmentation is quasi-
 deterministic and we don't want to re-pay the LLM on every build. Re-run with --force to

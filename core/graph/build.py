@@ -1,37 +1,32 @@
-"""Ingest a parsed corpus into Graphiti — one episode per pericope by default, per chapter with --no-pericope.
+"""Build the knowledge graph from a parsed corpus via Microsoft GraphRAG, into Neo4j.
 
-reference_time carries no real-world meaning for this corpus; we derive a monotonic
-timestamp from each episode's canonical index so Graphiti keeps narrative order on edges.
+Phases, each skippable:
+  1. prepare — segment into pericopes (cached) and write <rag_root>/input/<translation>.csv
+  2. index   — graphrag.api.build_index in-process (core.graph.engine); produces output/*.parquet and,
+               through our Neo4j vector store (core.graph.neo4j_vectors), writes entity embeddings
+               straight into Neo4j instead of lancedb
+  3. load    — mirror the parquet graph + community reports into Neo4j (core.graph.load_neo4j)
+  4. embed   — ensure the entity vector index and backfill any embeddings the store didn't write
+               (core.graph.embed)
 
-Resume/checkpoint: the graph itself is the checkpoint. Each successful add_episode leaves an
-Episodic node, so on a re-run we skip episodes whose node already exists in the group and
-ingest only the rest — which includes episodes that errored mid-run and never saved. This
-makes interrupted runs cheap to continue without re-paying for completed work.
+GraphRAG's pipeline cache (<rag_root>/cache/) makes re-runs cheap; incremental additions via
+`graphrag update`. `bgr query` runs GraphRAG's own search engine over the parquet output, with the
+entity embeddings served from the Neo4j vector index this build writes; no lancedb.
 """
 from __future__ import annotations
 
-import asyncio
 import sys
-from datetime import datetime, timedelta, timezone
-
-from graphiti_core.nodes import EpisodeType
-from neo4j import GraphDatabase
 
 from core.config import env
-from core.graph.client import build_graphiti, quiet_neo4j_logging
-from core.graph.entities import EDGE_TYPE_MAP, EDGE_TYPES, ENTITY_TYPES
 from core.graph.episodes import (
     Episode,
     build_episodes,
+    build_graphrag_input,
     build_pericope_episodes,
     translation_label,
 )
-from core.pipe import enrich as enrich_step
 from core.pipe import pericope as pericope_step
 from core.pipe.parser import load_records
-
-# Arbitrary epoch; only the ordering of reference_time across episodes matters.
-BASE_TIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _select(
@@ -53,46 +48,19 @@ def _select(
     return episodes
 
 
-def _ingested_episode_names(group: str) -> set[str]:
-    """Names of episodes already ingested into `group` — the resume checkpoint.
-
-    The graph is the source of truth: a successful add_episode leaves an Episodic node, so
-    its absence means the episode never completed (new, or errored mid-run) and is pending.
-    """
-    driver = GraphDatabase.driver(env.neo4j_uri, auth=(env.neo4j_user, env.neo4j_password))
-    try:
-        with driver.session() as sess:
-            rows = sess.run("MATCH (e:Episodic {group_id: $group}) RETURN e.name AS name", group=group)
-            return {r["name"] for r in rows}
-    finally:
-        driver.close()
-
-
-def _resolve_resume(resume: bool | None, done: int, total: int) -> bool:
-    """Whether to skip already-ingested episodes. None => ask interactively (Y default)."""
-    if resume is not None:
-        return resume
-    prompt = f"Checkpoint: {done}/{total} episodes already ingested. Resume (skip them)? [Y/n] "
-    try:
-        answer = input(prompt).strip().lower()
-    except EOFError:  # non-interactive (piped/background) — resume rather than redo work
-        print("non-interactive input; defaulting to resume", file=sys.stderr)
-        return True
-    return answer in ("", "y", "yes")
-
-
-async def _ingest(
+def run(
     target: str,
-    book: str | None,
-    chapter: int | None,
-    chapters: set[int] | None,
-    limit: int | None,
-    group_id: str | None,
-    dry_run: bool,
-    pericope: bool,
-    resume: bool | None,
-    enrich: bool,
+    book: str | None = None,
+    chapter: int | None = None,
+    chapters: set[int] | None = None,
+    limit: int | None = None,
+    dry_run: bool = False,
+    pericope: bool = True,
+    skip_index: bool = False,
+    skip_load: bool = False,
+    verbose: bool = False,
 ) -> int:
+    """Run prepare → index → load for data parsed under output/<target>[-N].json."""
     try:
         records, path = load_records(target)
     except FileNotFoundError as exc:
@@ -100,6 +68,7 @@ async def _ingest(
         return 1
 
     translation = translation_label(path.stem)
+
     if pericope:
         # Cache-first: reuse segmented pericopes; segment (and cache) only what's missing.
         # dry-run never calls the LLM — it previews from whatever is already cached.
@@ -116,16 +85,16 @@ async def _ingest(
         all_episodes = build_pericope_episodes(records, translation, pericope_map)
     else:
         all_episodes = build_episodes(records, translation)
-    episodes = _select(all_episodes, book, chapter, chapters, limit)
-    group = group_id or translation
 
+    episodes = _select(all_episodes, book, chapter, chapters, limit)
     if not episodes:
         print("error: no episodes match the given filters", file=sys.stderr)
         return 1
 
     total_verses = sum(e.verses for e in episodes)
     grain = "pericope" if pericope else "chapter"
-    print(f"Corpus  : {path} (translation '{translation}', group_id '{group}')")
+    rag_root = env.rag_root
+    print(f"Corpus  : {path} (translation '{translation}', rag_root '{rag_root}')")
     print(f"Episodes: {len(episodes)} ({grain}), {total_verses:,} verses "
           f"[{episodes[0].name} … {episodes[-1].name}]")
 
@@ -134,83 +103,41 @@ async def _ingest(
             print(f"  {e.name}: {e.verses} verses, {len(e.body)} chars")
         if len(episodes) > 5:
             print(f"  … (+{len(episodes) - 5} more)")
-        print("dry-run: nothing ingested")
+        plan = [f"write {rag_root / 'input' / (translation + '.csv')}"]
+        plan.append("skip index" if skip_index else "run `graphrag index`")
+        plan.append("skip load" if skip_load else "load Neo4j")
+        print("dry-run: would " + ", then ".join(plan))
         return 0
 
     if not env.api_key or env.api_key.startswith("your_"):
         print("error: OPENAI_API_KEY is not set in .env", file=sys.stderr)
         return 1
 
-    quiet_neo4j_logging()
+    # Phase 1 — prepare the GraphRAG input CSV.
+    csv_path = build_graphrag_input(episodes, translation, rag_root)
+    print(f"prepare : wrote {len(episodes)} rows -> {csv_path}")
 
-    # Resume/checkpoint: skip episodes already present in the graph for this group.
-    done_names = _ingested_episode_names(group)
-    already = [e for e in episodes if e.name in done_names]
-    if already:
-        if _resolve_resume(resume, len(already), len(episodes)):
-            episodes = [e for e in episodes if e.name not in done_names]
-            print(f"resume: skipping {len(already)} already-ingested episode(s), {len(episodes)} to go")
-        else:
-            print(f"re-ingesting all {len(episodes)} episode(s); existing nodes for "
-                  f"'{group}' may be duplicated unless the group was wiped")
-        if not episodes:
-            print("nothing to do: every selected episode is already in the graph")
-            return 0
+    # Phase 2 — index (batch), in-process via graphrag.api. Imported lazily so prepare-only and
+    # --skip-index runs don't pull in graphrag/pandas.
+    if not skip_index:
+        print("index   : graphrag.api.build_index (in-process)")
+        from core.graph import engine
 
-    # Enrichment: per-chapter extraction guidance (cache-first), applied to each pericope below.
-    guidance: dict[str, str] = {}
-    if enrich:
-        try:
-            guidance = enrich_step.ensure_guidance(
-                records, translation, book=book, chapter=chapter, chapters=chapters, limit=limit
-            )
-        except RuntimeError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+        rc = engine.index(verbose=verbose)
+        if rc != 0:
+            print(f"error: graphrag indexing failed (exit {rc})", file=sys.stderr)
+            return rc
+    else:
+        print("index   : skipped (--skip-index)")
 
-    graphiti = build_graphiti(env)
-    failures = 0
-    try:
-        await graphiti.build_indices_and_constraints()
-        for i, e in enumerate(episodes, 1):
-            try:
-                await graphiti.add_episode(
-                    name=e.name,
-                    episode_body=e.body,
-                    source_description=e.source_description,
-                    reference_time=BASE_TIME + timedelta(seconds=e.index),
-                    source=EpisodeType.text,
-                    group_id=group,
-                    entity_types=ENTITY_TYPES,
-                    edge_types=EDGE_TYPES,
-                    edge_type_map=EDGE_TYPE_MAP,
-                    custom_extraction_instructions=guidance.get(pericope_step.chapter_key(e.book, e.chapter)),
-                )
-                print(f"[{i}/{len(episodes)}] {e.name}: ok")
-            except Exception as exc:  # one bad chapter shouldn't abort the run
-                failures += 1
-                print(f"[{i}/{len(episodes)}] {e.name}: ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
-    finally:
-        await graphiti.close()
+    # Phase 3 — mirror the parquet output into Neo4j, then embed entities for local search.
+    # Imported lazily so prepare/index runs (and --skip-load) don't pull in the Neo4j driver.
+    if not skip_load:
+        from core.graph import embed, load_neo4j
 
-    print(f"done: {len(episodes) - failures}/{len(episodes)} episodes ingested"
-          + (f", {failures} failed" if failures else ""))
-    return 1 if failures else 0
-
-
-def run(
-    target: str,
-    book: str | None = None,
-    chapter: int | None = None,
-    chapters: set[int] | None = None,
-    limit: int | None = None,
-    group_id: str | None = None,
-    dry_run: bool = False,
-    pericope: bool = True,
-    resume: bool | None = None,
-    enrich: bool = True,
-) -> int:
-    """Build the knowledge graph for data parsed under output/<target>[-N].json."""
-    return asyncio.run(
-        _ingest(target, book, chapter, chapters, limit, group_id, dry_run, pericope, resume, enrich)
-    )
+        rc = load_neo4j.run(rag_root)
+        if rc != 0:
+            return rc
+        return embed.run()
+    print("load    : skipped (--skip-load)")
+    return 0

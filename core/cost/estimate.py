@@ -1,9 +1,11 @@
-"""Cost estimation — approximate USD to run the full corpus through the Graphiti pipeline.
+"""Cost estimation — approximate USD to run the full corpus through the GraphRAG pipeline.
 
 Counts corpus tokens with tiktoken, prices them against live OpenRouter rates
 (falling back to a builtin table), and applies a configurable overhead multiplier
-to account for Graphiti making several LLM calls per episode (extract nodes/edges,
-dedupe, summarize) with large system prompts repeated on each call.
+to account for GraphRAG making several LLM calls over the corpus: graph extraction
+(one call per chunk plus gleanings), description summarization, and community-report
+generation (one call per community, re-sending entity/relationship descriptions), each
+with large system prompts. Embeddings cover text units, entity descriptions, and reports.
 
 Estimate only — the ground-truth cost is OpenRouter's returned usage.cost.
 """
@@ -34,9 +36,13 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
     "openai/text-embedding-ada-002": {"prompt": 1.0e-7, "completion": 0.0},
 }
 
-DEFAULT_INPUT_FACTOR = 6.0   # LLM input tokens per corpus token (prompts + context per call)
-DEFAULT_OUTPUT_RATIO = 0.4   # LLM output tokens as a fraction of corpus tokens
-DEFAULT_EMBED_FACTOR = 1.0   # embedding tokens as a multiple of corpus tokens
+# GraphRAG re-reads the corpus across extraction (chunk + gleanings), summarization, and
+# community reports, each with a large system prompt — so input dwarfs the raw corpus. These are
+# deliberately rough; override with --input-factor / --output-ratio / --embed-factor and trust
+# OpenRouter's usage.cost for the real number.
+DEFAULT_INPUT_FACTOR = 8.0   # LLM input tokens per corpus token (prompts + context, repeated per call)
+DEFAULT_OUTPUT_RATIO = 0.5   # LLM output tokens as a fraction of corpus tokens (descriptions + reports)
+DEFAULT_EMBED_FACTOR = 1.5   # embedding tokens as a multiple of corpus tokens (text units + entities + reports)
 
 
 def encoding_for(model: str) -> tiktoken.Encoding:
@@ -200,6 +206,6 @@ def run(
         print()
         print(f"  (with main model {small_model}: ≈ {_fmt_usd(llm_cost(small_price) + embed_cost)})")
     print()
-    print("⚠ Estimate. Graphiti overhead approximated via multiplier;")
+    print("⚠ Estimate. GraphRAG overhead approximated via multiplier;")
     print("  the real cost is the usage.cost returned by OpenRouter.")
     return 0
