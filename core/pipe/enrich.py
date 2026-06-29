@@ -2,10 +2,12 @@
 
 Before extracting a chapter, a focused (small-model) LLM call reads the whole chapter — with
 its book/chapter context and the project's entity/edge ontology — and writes concise,
-context-specific instructions: which entities/types to expect, domain disambiguations (e.g.
+context-specific instructions: which entity TYPES to expect, domain disambiguations (e.g.
 Eden the region vs the Garden of Eden planted within it; "the man" = Adam), and which
 relationships matter. That string is passed to graphiti.add_episode(custom_extraction_
 instructions=...) for every pericope episode in the chapter, raising extraction precision.
+It deliberately does NOT enumerate a list of named entities to find: priming the extractor
+with a closed set biases its recall toward that set and suppresses everything else.
 
 Per-chapter (not per-pericope) is deliberate: one call per chapter is cheaper and the chapter
 gives the model enough context to see the whole arc and resolve disambiguations that span
@@ -32,13 +34,12 @@ class ExtractionGuidance(BaseModel):
 
     instructions: str = Field(
         description="Concise instructions (2-5 sentences) for extracting entities and "
-        "relationships from THIS chapter: which entity types to expect, disambiguations "
+        "relationships from THIS chapter: which entity TYPES to expect, disambiguations "
         "(aliases that are the SAME entity; similar names that are DIFFERENT entities), and "
-        "which relationships matter. Refer only to the provided entity and edge types."
-    )
-    likely_entities: list[str] = Field(
-        description="Specific named entities likely present in this chapter (people, places, "
-        "objects, etc.), to help the extractor not miss them."
+        "which relationships matter. Refer only to the provided entity and edge types. Do "
+        "NOT enumerate a checklist of specific named entities to find — the extractor reads "
+        "the full text itself, and a fixed list would bias it to that closed set and suppress "
+        "recall of everything else."
     )
 
 
@@ -63,7 +64,9 @@ _SYSTEM_PROMPT = (
     "entity types; aliases that denote the SAME entity (e.g. 'the LORD God' and 'God'); "
     "similar names that are DIFFERENT entities (e.g. a region vs a site within it); and the "
     "relationships worth recording. Be concise and specific to the chapter; do not invent "
-    "entity or edge types beyond those listed.\n\n" + _ontology_context()
+    "entity or edge types beyond those listed. Do NOT produce an exhaustive list of the named "
+    "entities present — the extractor reads the full text itself, and naming a closed set "
+    "would bias it toward those and suppress recall of the rest.\n\n" + _ontology_context()
 )
 
 
@@ -80,12 +83,13 @@ def load_cache(translation: str) -> dict:
 
 
 def _compose(entry: dict) -> str:
-    """Build the final instruction string passed to Graphiti from a cached guidance entry."""
-    instructions = (entry.get("instructions") or "").strip()
-    likely = entry.get("likely_entities") or []
-    if likely:
-        instructions += "\nLikely entities to capture: " + ", ".join(likely)
-    return instructions
+    """Build the final instruction string passed to Graphiti from a cached guidance entry.
+
+    Only the disambiguation/relationship instructions are passed through. We deliberately do
+    not feed a list of expected named entities to the extractor: priming it with a closed set
+    biases recall toward that set and suppresses everything else.
+    """
+    return (entry.get("instructions") or "").strip()
 
 
 def guide_chapter(book: str, chapter: int, verses: list[dict], guide: Runnable) -> dict:
@@ -98,7 +102,7 @@ def guide_chapter(book: str, chapter: int, verses: list[dict], guide: Runnable) 
     except Exception as exc:  # enrichment is best-effort; a failure just means no guidance
         print(f"warning: enrichment failed for {book} {chapter} "
               f"({type(exc).__name__}: {exc}); extracting without guidance", file=sys.stderr)
-        return {"instructions": "", "likely_entities": []}
+        return {"instructions": ""}
 
 
 def ensure_guidance(
@@ -107,6 +111,7 @@ def ensure_guidance(
     *,
     book: str | None = None,
     chapter: int | None = None,
+    chapters: set[int] | None = None,
     limit: int | None = None,
     model: str | None = None,
     force: bool = False,
@@ -118,7 +123,7 @@ def ensure_guidance(
     no API key is configured.
     """
     model = model or env.small_model or env.llm_model
-    groups = select_chapters(records, book, chapter, limit)
+    groups = select_chapters(records, book, chapter, limit, chapters=chapters)
     cache = load_cache(translation)
     guidance = cache["guidance"]
     pending = [grp for grp in groups if force or chapter_key(grp[0], grp[1]) not in guidance]

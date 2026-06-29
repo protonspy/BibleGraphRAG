@@ -11,6 +11,23 @@ from core.pipe import parser as parser_step
 from core.pipe import pericope as pericope_step
 
 
+def _parse_chapters(spec: str | None) -> set[int] | None:
+    """Parse a chapters spec like '1-3', '1,3', or '1-3,5' into a set of ints."""
+    if not spec:
+        return None
+    out: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return out or None
+
+
 def build_parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(prog="bgr", description="BibleGraphRAG CLI")
     sub = cli.add_subparsers(dest="command", required=True)
@@ -41,7 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_peri = sub.add_parser("pericope", help="Segment a parsed corpus into pericopes (LLM) and cache them")
     p_peri.add_argument("--target", required=True, help="Corpus name, resolved to output/<name>[-N].json")
     p_peri.add_argument("--book", default=None, help="Only segment this book (e.g. Genesis)")
-    p_peri.add_argument("--chapter", type=int, default=None, help="Only segment this chapter number")
+    peri_ch = p_peri.add_mutually_exclusive_group()
+    peri_ch.add_argument("--chapter", type=int, default=None, help="Only segment this chapter number")
+    peri_ch.add_argument("--chapters", default=None, help="Only segment these chapters: '1-3', '1,3', '1-3,5'")
     p_peri.add_argument("--limit", type=int, default=None, help="Cap the number of chapters to segment")
     p_peri.add_argument("--model", default=None, help="Override the LLM model id (default: LLM_MODEL from .env)")
     p_peri.add_argument("--force", action="store_true", help="Re-segment chapters already in the cache")
@@ -50,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
         args.target,
         book=args.book,
         chapter=args.chapter,
+        chapters=_parse_chapters(args.chapters),
         limit=args.limit,
         model=args.model,
         force=args.force,
@@ -59,7 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_build = sub.add_parser("build", help="Ingest a parsed corpus into the Graphiti knowledge graph")
     p_build.add_argument("--target", required=True, help="Corpus name, resolved to output/<name>[-N].json")
     p_build.add_argument("--book", default=None, help="Only ingest this book (e.g. Genesis)")
-    p_build.add_argument("--chapter", type=int, default=None, help="Only ingest this chapter number")
+    build_ch = p_build.add_mutually_exclusive_group()
+    build_ch.add_argument("--chapter", type=int, default=None, help="Only ingest this chapter number")
+    build_ch.add_argument("--chapters", default=None, help="Only ingest these chapters: '1-3', '1,3', '1-3,5'")
     p_build.add_argument("--limit", type=int, default=None, help="Cap the number of episodes")
     p_build.add_argument("--group-id", default=None, help="Graph namespace (default: translation name)")
     p_build.add_argument("--no-pericope", dest="pericope", action="store_false", default=True,
@@ -76,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         args.target,
         book=args.book,
         chapter=args.chapter,
+        chapters=_parse_chapters(args.chapters),
         limit=args.limit,
         group_id=args.group_id,
         dry_run=args.dry_run,

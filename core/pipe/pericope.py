@@ -123,7 +123,13 @@ def segment_chapter(book: str, chapter: int, verses: list[dict], segmenter: Runn
         return [{"start_verse": verse_numbers[0], "end_verse": verse_numbers[-1], "title": ""}]
 
 
-def select_chapters(records: list[dict], book: str | None, chapter: int | None, limit: int | None):
+def select_chapters(
+    records: list[dict],
+    book: str | None,
+    chapter: int | None,
+    limit: int | None,
+    chapters: set[int] | None = None,
+):
     """Yield (book, chapter, verses) groups matching the filters, in canonical order."""
     groups = [
         (b, c, list(g))
@@ -133,6 +139,8 @@ def select_chapters(records: list[dict], book: str | None, chapter: int | None, 
         groups = [grp for grp in groups if grp[0].lower() == book.lower()]
     if chapter is not None:
         groups = [grp for grp in groups if grp[1] == chapter]
+    if chapters is not None:
+        groups = [grp for grp in groups if grp[1] in chapters]
     if limit is not None:
         groups = groups[:limit]
     return groups
@@ -144,6 +152,7 @@ def ensure_cache(
     *,
     book: str | None = None,
     chapter: int | None = None,
+    chapters: set[int] | None = None,
     limit: int | None = None,
     model: str | None = None,
     force: bool = False,
@@ -157,7 +166,7 @@ def ensure_cache(
     if segmentation is needed but no API key is configured.
     """
     model = model or env.small_model or env.llm_model
-    groups = select_chapters(records, book, chapter, limit)
+    groups = select_chapters(records, book, chapter, limit, chapters=chapters)
     cache = load_cache(translation)
     chapters = cache["chapters"]
     pending = [grp for grp in groups if force or chapter_key(grp[0], grp[1]) not in chapters]
@@ -183,6 +192,7 @@ def run(
     target: str,
     book: str | None = None,
     chapter: int | None = None,
+    chapters: set[int] | None = None,
     limit: int | None = None,
     model: str | None = None,
     force: bool = False,
@@ -197,7 +207,7 @@ def run(
 
     translation = translation_label(path.stem)
     model = model or env.small_model or env.llm_model
-    groups = select_chapters(records, book, chapter, limit)
+    groups = select_chapters(records, book, chapter, limit, chapters=chapters)
     if not groups:
         print("error: no chapters match the given filters", file=sys.stderr)
         return 1
@@ -223,7 +233,8 @@ def run(
         return 0
 
     try:
-        ensure_cache(records, translation, book=book, chapter=chapter, limit=limit, model=model, force=force)
+        ensure_cache(records, translation, book=book, chapter=chapter, chapters=chapters,
+                     limit=limit, model=model, force=force)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

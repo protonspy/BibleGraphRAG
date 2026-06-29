@@ -77,9 +77,12 @@ def build_pericope_episodes(
             body = "\n".join(f"{v['verse']} {v['content']}" for v in in_span)
             episodes.append(
                 Episode(
-                    name=f"{ref} — {title}" if title else ref,
+                    # Name is the stable, unique reference only — no LLM-generated title, which
+                    # is volatile across re-segmentation and would break checkpoint matching.
+                    # The descriptive title is kept in source_description for human context.
+                    name=ref,
                     body=body,
-                    source_description=f"{translation} — {ref}",
+                    source_description=f"{translation} — {ref}" + (f" — {title}" if title else ""),
                     index=len(episodes),
                     book=book,
                     chapter=chapter,

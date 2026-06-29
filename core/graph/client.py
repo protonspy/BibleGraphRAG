@@ -1,8 +1,18 @@
 """Build a configured Graphiti client from Settings.
 
-Uses OpenAIGenericClient (chat.completions + json_schema) rather than OpenAIClient,
-because OpenAIClient calls the OpenAI Responses API (responses.parse), which OpenRouter
-does not expose — OpenRouter is Chat Completions only.
+Uses OpenAIGenericClient (chat.completions) rather than OpenAIClient, because
+OpenAIClient calls the OpenAI Responses API (responses.parse), which OpenRouter does
+not expose — OpenRouter is Chat Completions only.
+
+Structured-output mode is configurable via Settings (``STRUCTURED_OUTPUT_MODE``) and
+defaults to ``json_object``. Native ``json_schema`` sends the raw Pydantic schema as
+response_format; providers that enforce OpenAI's strict structured-output subset
+(Azure/OpenAI) reject it with "'additionalProperties' is required to be supplied and to
+be false", since model_json_schema() never emits that. In ``json_object`` mode Graphiti
+injects the schema into the prompt and parses the JSON itself (with code-fence stripping
++ retry), which works across every OpenRouter-routed provider — trading provider-side
+constrained decoding for prompt-guided, best-effort parsing. Use ``json_schema`` only for
+constrained-decoding providers (vLLM-style, e.g. gpt-oss-120b) that enforce it.
 """
 from __future__ import annotations
 
@@ -42,7 +52,9 @@ def build_graphiti(settings: Settings) -> Graphiti:
         model=settings.llm_model,
         small_model=settings.small_model,
     )
-    llm_client = OpenAIGenericClient(config=llm_config)
+    llm_client = OpenAIGenericClient(
+        config=llm_config, structured_output_mode=settings.structured_output_mode
+    )
 
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(

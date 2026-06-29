@@ -34,12 +34,20 @@ from core.pipe.parser import load_records
 BASE_TIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-def _select(episodes: list[Episode], book: str | None, chapter: int | None, limit: int | None) -> list[Episode]:
+def _select(
+    episodes: list[Episode],
+    book: str | None,
+    chapter: int | None,
+    chapters: set[int] | None,
+    limit: int | None,
+) -> list[Episode]:
     if book is not None:
         book_lower = book.lower()
         episodes = [e for e in episodes if e.book.lower() == book_lower]
     if chapter is not None:
         episodes = [e for e in episodes if e.chapter == chapter]
+    if chapters is not None:
+        episodes = [e for e in episodes if e.chapter in chapters]
     if limit is not None:
         episodes = episodes[:limit]
     return episodes
@@ -77,6 +85,7 @@ async def _ingest(
     target: str,
     book: str | None,
     chapter: int | None,
+    chapters: set[int] | None,
     limit: int | None,
     group_id: str | None,
     dry_run: bool,
@@ -99,7 +108,7 @@ async def _ingest(
         else:
             try:
                 pericope_map = pericope_step.ensure_cache(
-                    records, translation, book=book, chapter=chapter, limit=limit
+                    records, translation, book=book, chapter=chapter, chapters=chapters, limit=limit
                 )
             except RuntimeError as exc:
                 print(f"error: {exc}", file=sys.stderr)
@@ -107,7 +116,7 @@ async def _ingest(
         all_episodes = build_pericope_episodes(records, translation, pericope_map)
     else:
         all_episodes = build_episodes(records, translation)
-    episodes = _select(all_episodes, book, chapter, limit)
+    episodes = _select(all_episodes, book, chapter, chapters, limit)
     group = group_id or translation
 
     if not episodes:
@@ -152,7 +161,9 @@ async def _ingest(
     guidance: dict[str, str] = {}
     if enrich:
         try:
-            guidance = enrich_step.ensure_guidance(records, translation, book=book, chapter=chapter, limit=limit)
+            guidance = enrich_step.ensure_guidance(
+                records, translation, book=book, chapter=chapter, chapters=chapters, limit=limit
+            )
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -191,6 +202,7 @@ def run(
     target: str,
     book: str | None = None,
     chapter: int | None = None,
+    chapters: set[int] | None = None,
     limit: int | None = None,
     group_id: str | None = None,
     dry_run: bool = False,
@@ -199,4 +211,6 @@ def run(
     enrich: bool = True,
 ) -> int:
     """Build the knowledge graph for data parsed under output/<target>[-N].json."""
-    return asyncio.run(_ingest(target, book, chapter, limit, group_id, dry_run, pericope, resume, enrich))
+    return asyncio.run(
+        _ingest(target, book, chapter, chapters, limit, group_id, dry_run, pericope, resume, enrich)
+    )
