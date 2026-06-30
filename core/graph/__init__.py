@@ -1,1 +1,1 @@
-"""Graph pipeline — build a Microsoft GraphRAG index from a parsed corpus and mirror it into Neo4j."""
+"""Graph pipeline — build a Microsoft GraphRAG index (parquet + lancedb) and query it natively."""

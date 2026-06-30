@@ -1,9 +1,9 @@
 """Shared LangChain access for the pipeline's own LLM calls (outside GraphRAG).
 
-GraphRAG manages its own clients (litellm) for graph extraction, summarization, and community
-reports. This module is for the steps we drive directly — pericope segmentation and the Neo4j-backed
-query layer (core.graph.search / core.graph.embed) — using LangChain's ChatOpenAI / OpenAIEmbeddings
-pointed at OpenRouter (same base_url/key as the rest of the pipeline).
+GraphRAG manages its own clients (litellm) for graph extraction, summarization, community reports,
+and query-time embeddings. This module is for the steps we drive directly — pericope segmentation
+and the query router (core.graph.route) — using LangChain's ChatOpenAI / OpenAIEmbeddings pointed at
+OpenRouter (same base_url/key as the rest of the pipeline).
 """
 from __future__ import annotations
 
@@ -51,7 +51,6 @@ def structured_model(
 def embeddings_model() -> OpenAIEmbeddings:
     """Build an OpenAIEmbeddings bound to OpenRouter (embeddings route). Raises if no API key.
 
-    Used by the Neo4j query layer to embed entities at load time and the query at search time.
     check_embedding_ctx_length=False skips LangChain's tiktoken-based context trimming, which
     chokes on the provider-prefixed model id ("openai/text-embedding-3-small").
     """

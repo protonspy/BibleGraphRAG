@@ -2,15 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
-
-from core.config import env
 
 from core.cost import estimate as estimate_step
 from core.graph import build as build_step
-from core.graph import inspect as inspect_step
 from core.graph import query as query_step
-from core.graph import transfer as transfer_step
 from core.pipe import parser as parser_step
 from core.pipe import pericope as pericope_step
 
@@ -80,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
         dry_run=args.dry_run,
     ))
 
-    p_build = sub.add_parser("build", help="Build the GraphRAG index from a parsed corpus and load it into Neo4j")
+    p_build = sub.add_parser("build", help="Build the GraphRAG index (parquet + lancedb) from a parsed corpus")
     p_build.add_argument("--target", required=True, help="Corpus name, resolved to output/<name>[-N].json")
     p_build.add_argument("--book", default=None, help="Only include this book (e.g. Genesis)")
     build_ch = p_build.add_mutually_exclusive_group()
@@ -91,10 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="One document per chapter (default: per pericope, LLM-segmented and cached on demand)")
     p_build.add_argument("--skip-index", action="store_true",
                          help="Only prepare the input CSV; don't run `graphrag index`")
-    p_build.add_argument("--skip-load", action="store_true",
-                         help="Stop after indexing; don't load the parquet output into Neo4j")
     p_build.add_argument("--verbose", action="store_true", help="Verbose `graphrag index` output")
-    p_build.add_argument("--dry-run", action="store_true", help="Show the plan without calling the LLM/GraphRAG/Neo4j")
+    p_build.add_argument("--dry-run", action="store_true", help="Show the plan without calling the LLM/GraphRAG")
     p_build.set_defaults(handler=lambda args: build_step.run(
         args.target,
         book=args.book,
@@ -104,45 +97,18 @@ def build_parser() -> argparse.ArgumentParser:
         dry_run=args.dry_run,
         pericope=args.pericope,
         skip_index=args.skip_index,
-        skip_load=args.skip_load,
         verbose=args.verbose,
     ))
 
-    p_transfer = sub.add_parser("transfer", help="Export/import the Neo4j graph as JSON (backup/restore)")
-    transfer_sub = p_transfer.add_subparsers(dest="transfer_command", required=True)
-
-    p_export = transfer_sub.add_parser("export", help="Dump the graph to export/<name>-<N>.json")
-    p_export.add_argument("--target", required=True, help="Output name, resolved to export/<name>-<N>.json")
-    p_export.add_argument("--no-embeddings", action="store_true",
-                          help="Strip any *_embedding vectors from the dump (smaller file)")
-    p_export.add_argument("--dry-run", action="store_true", help="Show what would be exported without writing a file")
-    p_export.set_defaults(handler=lambda args: transfer_step.export_run(
-        args.target,
-        embeddings=not args.no_embeddings,
-        dry_run=args.dry_run,
-    ))
-
-    p_import = transfer_sub.add_parser("import", help="Load export/<name>[-N].json into Neo4j (MERGE by uuid)")
-    p_import.add_argument("--target", required=True, help="Input name, resolved to export/<name>[-N].json")
-    p_import.add_argument("--wipe", action="store_true",
-                          help="DETACH DELETE the file's group_id (or whole graph) before loading")
-    p_import.add_argument("--dry-run", action="store_true", help="Show the import plan without touching Neo4j")
-    p_import.set_defaults(handler=lambda args: transfer_step.import_run(
-        args.target,
-        wipe=args.wipe,
-        dry_run=args.dry_run,
-    ))
-
-    p_inspect = sub.add_parser("inspect", help="Show the loaded graph: entities, relationships, communities")
-    p_inspect.add_argument("--limit", type=int, default=30, help="Max entities/relationships/communities to list")
-    p_inspect.set_defaults(handler=lambda args: inspect_step.run(limit=args.limit))
-
-    p_query = sub.add_parser("query", help="Query the graph in Neo4j (global / local search)")
+    p_query = sub.add_parser("query", help="Query the index (auto-routed, or global / local / drift / basic)")
     p_query.add_argument("question", help="The question to ask the graph")
-    p_query.add_argument("--method", "-m", default="global", choices=list(query_step.METHODS),
-                         help="global = sensemaking over community reports; local = entity vector search + neighbourhood")
+    p_query.add_argument("--method", "-m", default=None, choices=list(query_step.METHODS),
+                         help="Search method (default: auto — an LLM classifies the question). "
+                              "global = sensemaking over community reports; local = entity vector search + "
+                              "neighbourhood; drift = community priming + entity drill-down; "
+                              "basic = plain vector RAG over text units")
     p_query.add_argument("--community-level", type=int, default=None,
-                         help="Max Leiden level of community reports to use (global search)")
+                         help="Max Leiden level of community reports to use (global / drift search)")
     p_query.add_argument("--response-type", default=None,
                          help="Free-form response shape, e.g. 'single paragraph', 'bullet points'")
     p_query.add_argument("--verbose", action="store_true",
@@ -160,12 +126,4 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    # The Neo4j-backed steps (build --no-skip-load, inspect, transfer) surface a noisy driver
-    # traceback when the database is down or credentials are wrong; turn that into a one-line hint.
-    from neo4j.exceptions import AuthError, ServiceUnavailable
-    try:
-        return args.handler(args)
-    except (ServiceUnavailable, AuthError) as exc:
-        print(f"error: Neo4j unavailable at {env.neo4j_uri}: {exc}\n"
-              f"  start it (docker compose up -d) and check NEO4J_* in .env", file=sys.stderr)
-        return 1
+    return args.handler(args)

@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Resolved configuration for the GraphRAG pipeline (Neo4j + OpenRouter)."""
+    """Resolved configuration for the GraphRAG pipeline (parquet + lancedb + OpenRouter)."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -16,20 +16,16 @@ class Settings(BaseSettings):
     )
 
     # Root of the Microsoft GraphRAG workspace (settings.yaml + prompts/ + input/ + output/).
-    # `bgr build` writes input here, indexes via graphrag.api, then loads the resulting parquet into
-    # Neo4j. Not named "graphrag" so it can't shadow the installed package. Resolved to an ABSOLUTE
-    # path (see below) because graphrag's load_config does os.chdir(root) — a relative rag_root would
-    # then resolve against the changed cwd in any step that runs after indexing (e.g. load_neo4j).
+    # `bgr build` writes input here and indexes via graphrag.api, producing output/*.parquet and the
+    # output/lancedb vector tables. Not named "graphrag" so it can't shadow the installed package.
+    # Resolved to an ABSOLUTE path (see below) because graphrag's load_config does os.chdir(root) — a
+    # relative rag_root would otherwise resolve against the changed cwd in any step run after indexing.
     rag_root: Path = Field(Path("rag"), validation_alias="RAG_ROOT")
 
     @field_validator("rag_root", mode="after")
     @classmethod
     def _absolute_rag_root(cls, value: Path) -> Path:
         return value.resolve()
-
-    neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
-    neo4j_password: str = ""
 
     api_key: str = Field("", validation_alias="OPENAI_API_KEY")
     base_url: str = Field("https://openrouter.ai/api/v1", validation_alias="OPENAI_BASE_URL")

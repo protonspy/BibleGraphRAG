@@ -1,17 +1,13 @@
-"""Build the knowledge graph from a parsed corpus via Microsoft GraphRAG, into Neo4j.
+"""Build the knowledge graph from a parsed corpus via Microsoft GraphRAG (native parquet + lancedb).
 
-Phases, each skippable:
+Phases:
   1. prepare — segment into pericopes (cached) and write <rag_root>/input/<translation>.csv
-  2. index   — graphrag.api.build_index in-process (core.graph.engine); produces output/*.parquet and,
-               through our Neo4j vector store (core.graph.neo4j_vectors), writes entity embeddings
-               straight into Neo4j instead of lancedb
-  3. load    — mirror the parquet graph + community reports into Neo4j (core.graph.load_neo4j)
-  4. embed   — ensure the entity vector index and backfill any embeddings the store didn't write
-               (core.graph.embed)
+  2. index   — graphrag.api.build_index in-process (core.graph.engine); produces <rag_root>/output/
+               *.parquet (graph + community reports) and the lancedb vector tables alongside them
 
 GraphRAG's pipeline cache (<rag_root>/cache/) makes re-runs cheap; incremental additions via
-`graphrag update`. `bgr query` runs GraphRAG's own search engine over the parquet output, with the
-entity embeddings served from the Neo4j vector index this build writes; no lancedb.
+`graphrag update`. `bgr query` runs GraphRAG's own search engine over this output — no database
+server: parquet for the graph/text, on-disk lancedb for the embeddings.
 """
 from __future__ import annotations
 
@@ -57,10 +53,9 @@ def run(
     dry_run: bool = False,
     pericope: bool = True,
     skip_index: bool = False,
-    skip_load: bool = False,
     verbose: bool = False,
 ) -> int:
-    """Run prepare → index → load for data parsed under output/<target>[-N].json."""
+    """Run prepare → index for data parsed under output/<target>[-N].json."""
     try:
         records, path = load_records(target)
     except FileNotFoundError as exc:
@@ -104,8 +99,7 @@ def run(
         if len(episodes) > 5:
             print(f"  … (+{len(episodes) - 5} more)")
         plan = [f"write {rag_root / 'input' / (translation + '.csv')}"]
-        plan.append("skip index" if skip_index else "run `graphrag index`")
-        plan.append("skip load" if skip_load else "load Neo4j")
+        plan.append("skip index" if skip_index else "run `graphrag index` (parquet + lancedb)")
         print("dry-run: would " + ", then ".join(plan))
         return 0
 
@@ -118,26 +112,14 @@ def run(
     print(f"prepare : wrote {len(episodes)} rows -> {csv_path}")
 
     # Phase 2 — index (batch), in-process via graphrag.api. Imported lazily so prepare-only and
-    # --skip-index runs don't pull in graphrag/pandas.
-    if not skip_index:
-        print("index   : graphrag.api.build_index (in-process)")
-        from core.graph import engine
-
-        rc = engine.index(verbose=verbose)
-        if rc != 0:
-            print(f"error: graphrag indexing failed (exit {rc})", file=sys.stderr)
-            return rc
-    else:
+    # --skip-index runs don't pull in graphrag/pandas. Writes parquet + lancedb under output/.
+    if skip_index:
         print("index   : skipped (--skip-index)")
+        return 0
+    print("index   : graphrag.api.build_index (in-process; parquet + lancedb)")
+    from core.graph import engine
 
-    # Phase 3 — mirror the parquet output into Neo4j, then embed entities for local search.
-    # Imported lazily so prepare/index runs (and --skip-load) don't pull in the Neo4j driver.
-    if not skip_load:
-        from core.graph import embed, load_neo4j
-
-        rc = load_neo4j.run(rag_root)
-        if rc != 0:
-            return rc
-        return embed.run()
-    print("load    : skipped (--skip-load)")
-    return 0
+    rc = engine.index(verbose=verbose)
+    if rc != 0:
+        print(f"error: graphrag indexing failed (exit {rc})", file=sys.stderr)
+    return rc

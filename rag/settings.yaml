@@ -72,18 +72,22 @@ cache:
     base_dir: "cache"
     
 vector_store:
-  # Custom backend registered by core.graph.neo4j_vectors (register_vector_store). The embedding
-  # workflow writes vectors straight into Neo4j nodes instead of lancedb; connection comes from .env.
-  type: neo4j
-  vector_size: 1536   # matches EMBEDDING_DIM — the Neo4j vector index dimension
+  # Native GraphRAG store: the embedding workflow writes vectors to on-disk lancedb tables under
+  # <rag_root>/output/lancedb (entity_description / text_unit_text / community_full_content). Query
+  # time reads them back from there — no database server. Ships as files alongside the parquet output.
+  type: lancedb
+  db_uri: output/lancedb
+  vector_size: 1536   # matches EMBEDDING_DIM; without it lancedb defaults to 3072 and the write fails
 
 ### Workflow settings ###
 
 embed_text:
   embedding_model_id: default_embedding_model
-  # Only entity embeddings — what core.graph.search.local_search needs. Keyed by id onto __Entity__.
-  # (text_unit_text / community_full_content would also work but aren't used by our query layer.)
-  names: [entity_description]
+  # All three targets — each query method needs a different lancedb table:
+  #   entity_description     : local seeds + drift drill-down
+  #   text_unit_text         : basic search retrieval
+  #   community_full_content : drift priming (community-report embeddings)
+  names: [entity_description, text_unit_text, community_full_content]
 
 extract_graph:
   completion_model_id: default_completion_model
