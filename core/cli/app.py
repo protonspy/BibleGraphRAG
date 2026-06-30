@@ -132,6 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Number of research rounds (follow-ups drive the next round); default 3")
     p_research.add_argument("--answer", dest="output_mode", action="store_const", const="answer",
                             default="report", help="Produce a concise answer instead of a full report")
+    p_research.add_argument("--no-scholar", dest="scholar", action="store_false", default=True,
+                            help="Disable OpenAlex scholarly augmentation (research the graph only)")
     p_research.add_argument("--dry-run", action="store_true",
                             help="Print the graph structure and plan without calling the LLM/index")
     p_research.set_defaults(handler=lambda args: research_step.run(
@@ -139,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
         breadth=args.breadth,
         depth=args.depth,
         output_mode=args.output_mode,
+        scholar=args.scholar,
         dry_run=args.dry_run,
     ))
 

@@ -45,27 +45,33 @@ def run(
     breadth: int = 4,
     depth: int = 2,
     output_mode: str = "report",
+    scholar: bool = True,
     dry_run: bool = False,
 ) -> int:
     """Run deep research over the built index and print the final report/answer to stdout.
 
-    `breadth` = queries planned per round (halved each round); `depth` = number of rounds. Returns a
+    `breadth` = queries planned per round (halved each round); `depth` = number of rounds. `scholar`
+    augments every sub-query with OpenAlex scholarly literature (Open-Access citations). Returns a
     process exit code. `dry_run` prints the graph structure and the plan without calling the LLM/index.
     """
     graph = build_graph()
     if dry_run:
         print(graph.get_graph().draw_mermaid())
-        print(f"[plan] question={question!r} breadth={breadth} depth={depth} mode={output_mode}",
-              file=sys.stderr)
+        print(f"[plan] question={question!r} breadth={breadth} depth={depth} mode={output_mode} "
+              f"scholar={scholar}", file=sys.stderr)
         return 0
 
     initial: ResearchState = {
         "question": question,
         "output_mode": output_mode,  # type: ignore[typeddict-item]
+        "scholar": scholar,
         "depth": depth,
         "breadth": breadth,
         "learnings": [],
         "sources": [],
+        "citations": [],
+        "lit_references": [],
+        "read_works": [],
         "global_calls": 0,
     }
     # Each round is a handful of super-steps; cap generously so depth (≤5) never trips the limit.

@@ -12,6 +12,7 @@ dependencies = [
     "tiktoken>=0.13.0",
     "botocore>=1.43.36",
     "langgraph>=1.2.7",
+    "httpx>=0.28.1",
 ]
 
 [project.scripts]

@@ -40,18 +40,27 @@ class _Route(BaseModel):
     reason: str = Field(description="One short clause justifying the choice.")
 
 
-def classify_method(question: str) -> str:
-    """Classify `question` into one of METHODS via a small LLM call; fall back to 'local' on error."""
+def classify_method(question: str, allowed: tuple[str, ...] = METHODS) -> str:
+    """Classify `question` into one of `allowed` methods via a small LLM call; fall back on error.
+
+    `allowed` constrains the choice to a subset of METHODS (the deep researcher passes
+    ("local", "global") to keep drift's per-query cost out of its loop). It defaults to all of
+    METHODS, so `bgr query` routing is unchanged. The fallback is 'local' when allowed, else the
+    first allowed method.
+    """
     from core.llm import structured_model
 
+    fallback = _FALLBACK if _FALLBACK in allowed else allowed[0]
     try:
         model = structured_model(_Route, model=env.small_model or env.llm_model)
-        decision: _Route = model.invoke([("system", _SYSTEM), ("human", question)])  # type: ignore[assignment]
-        if decision.method not in METHODS:  # belt-and-suspenders; the schema already constrains it
-            raise ValueError(f"router returned unknown method {decision.method!r}")
-        print(f"[router] {decision.method} — {decision.reason}", file=sys.stderr, flush=True)
-        return decision.method
+        system = _SYSTEM
+        if set(allowed) != set(METHODS):  # restrict the choice; the schema still permits all four
+            system += f"\n\nFor this task choose ONLY from: {', '.join(allowed)}."
+        decision: _Route = model.invoke([("system", system), ("human", question)])  # type: ignore[assignment]
+        method = decision.method if decision.method in allowed else fallback
+        print(f"[router] {method} — {decision.reason}", file=sys.stderr, flush=True)
+        return method
     except Exception as exc:
         print(f"[router] classification failed ({type(exc).__name__}: {exc}); "
-              f"falling back to '{_FALLBACK}'", file=sys.stderr, flush=True)
-        return _FALLBACK
+              f"falling back to '{fallback}'", file=sys.stderr, flush=True)
+        return fallback

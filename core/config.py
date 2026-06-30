@@ -37,5 +37,24 @@ class Settings(BaseSettings):
     embed_api_key: str | None = Field(None, validation_alias="EMBED_API_KEY")
     embed_base_url: str | None = Field(None, validation_alias="EMBED_BASE_URL")
 
+    # Deep researcher — its own model, independent of the GraphRAG indexing/search models. It governs
+    # only the LangGraph orchestration LLM calls (plan queries, distil answers, synthesize the report);
+    # the GraphRAG searches the loop runs still use settings.yaml. `research_small_model` handles the hot
+    # path (distillation, run breadth×depth times) and falls back to `research_model` when unset.
+    research_model: str = Field("deepseek/deepseek-v4-flash", validation_alias="RESEARCH_MODEL")
+    research_small_model: str | None = Field(None, validation_alias="RESEARCH_SMALL_MODEL")
+
+    # OpenAlex — the deep researcher's scholarly source (free, keyless). `openalex_mailto` opts into
+    # the faster "polite pool"; set it to a contact email in .env. per_page caps works per sub-query.
+    openalex_base_url: str = Field("https://api.openalex.org", validation_alias="OPENALEX_BASE_URL")
+    openalex_mailto: str | None = Field(None, validation_alias="OPENALEX_MAILTO")
+    openalex_per_page: int = Field(5, validation_alias="OPENALEX_PER_PAGE")
+
+    # Full-text acquisition for the deep-read tier. The researcher first tries to fetch+parse a work's
+    # OA url itself (httpx + pypdf/trafilatura); when that's blocked (403) or yields too little, it falls
+    # back to this reader service, which emulates a browser and returns clean text. Jina Reader's keyless
+    # endpoint is the default (prefix the target url). Set empty to disable the fallback (degrade to abstract).
+    reader_service_url: str | None = Field("https://r.jina.ai/", validation_alias="READER_SERVICE_URL")
+
 
 env = Settings()

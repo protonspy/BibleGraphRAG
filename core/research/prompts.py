@@ -26,13 +26,40 @@ def system_prompt() -> str:
 
 GENERATE_QUERIES = """Given the research brief below, generate up to {n} unique search queries that, \
 answered together, would thoroughly research it. Each query must be self-contained and answerable \
-from the Bible knowledge graph. Make them distinct — do not overlap. For each, also state the goal: \
-what it should establish and what to investigate next once its results are in.
+from the Bible knowledge graph. Make them distinct — do not overlap. For each, state the goal (what \
+it should establish and what to investigate next once its results are in) AND a scholar_query: the \
+same information need expressed as academic search keywords for a scholarly literature database \
+(English, domain terminology — named figures, places, periods, methods, theological concepts; no \
+question words), used to pull complementary peer-reviewed research.
 
 <brief>{seed}</brief>
 
 Learnings so far (use them to go deeper and fill gaps; do not repeat what is already known):
 {learnings}"""
+
+
+READ_ARTICLE = """You are given the {provenance} of ONE scholarly work returned for the query \
+<query>{query}</query>, in service of this research brief:
+
+<brief>{brief}</brief>
+
+<work>{meta}</work>
+<contents>
+{contents}
+</contents>
+
+First decide whether this work is genuinely relevant to the brief (not merely keyword-adjacent). If \
+it is NOT relevant, set relevant=false and leave the other fields empty. If it IS relevant:
+- summary: a cohesive, self-contained synthesis of the work's central argument and findings — what it \
+claims and how it supports it. Attribute to the author(s); distinguish the work's interpretation from \
+the biblical text itself; invent nothing absent from the contents. If only an abstract was available, \
+summarize what it asserts and keep it brief.
+- references: up to {n_refs} key sources this work itself relies on (author/year/title as they appear \
+in the contents), each with a short note on what it supports — these let a reader validate and trace \
+the work's claims. List only references actually present in the contents; if none are discernible, \
+return an empty list.
+- research_queries: up to {n_queries} specific new research questions this work opens up, worth \
+investigating next over the Bible knowledge graph or in further literature."""
 
 
 PROCESS_RESULT = """Below is the answer a GraphRAG search returned for the query <query>{query}</query>. \
