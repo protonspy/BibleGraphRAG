@@ -72,13 +72,20 @@ def _load_outputs(required: list[str], optional: tuple[str, ...] = ()) -> dict |
     return tables
 
 
-async def _stream(agen) -> str:
-    """Drain a GraphRAG *_search_streaming async generator to stdout, returning the full text."""
+async def _stream(agen, stream: bool = True) -> str:
+    """Drain a GraphRAG *_search_streaming async generator, returning the full text.
+
+    stream=True echoes each chunk to stdout (the `bgr query` behaviour); stream=False just
+    accumulates and returns it — used by the deep researcher, which runs many searches and must
+    not flood stdout with every intermediate answer.
+    """
     full = ""
     async for chunk in agen:
         full += chunk
-        print(chunk, end="", flush=True)
-    print()  # close the streamed line
+        if stream:
+            print(chunk, end="", flush=True)
+    if stream:
+        print()  # close the streamed line
     return full
 
 
@@ -95,7 +102,7 @@ def _run(coro_factory) -> str:
 # --- global search: map-reduce over community reports (GraphRAG engine) ------------------
 
 def global_search(query: str, level: int = 2, response_type: str = "Multiple Paragraphs",
-                  verbose: bool = False) -> str:
+                  verbose: bool = False, stream: bool = True) -> str:
     """Map-reduce over the community reports with GraphRAG's global search engine."""
     tables = _load_outputs(["entities", "communities", "community_reports"])
     if tables is None:
@@ -116,7 +123,7 @@ def global_search(query: str, level: int = 2, response_type: str = "Multiple Par
             query=query,
             callbacks=_make_callbacks(verbose),
             verbose=verbose,
-        ))
+        ), stream=stream)
 
     answer = _run(go)
     _note(f"[graphrag/global] done ({time.perf_counter() - started:.1f}s)")
@@ -126,7 +133,7 @@ def global_search(query: str, level: int = 2, response_type: str = "Multiple Par
 # --- local search: entity vector search + neighbourhood (GraphRAG engine) ----------------
 
 def local_search(query: str, level: int = 2, response_type: str = "Multiple Paragraphs",
-                 verbose: bool = False) -> str:
+                 verbose: bool = False, stream: bool = True) -> str:
     """Seed on entities most similar to the query (lancedb vector store), expand, then synthesize."""
     tables = _load_outputs(
         ["communities", "community_reports", "text_units", "relationships", "entities"],
@@ -152,7 +159,7 @@ def local_search(query: str, level: int = 2, response_type: str = "Multiple Para
             query=query,
             callbacks=_make_callbacks(verbose),
             verbose=verbose,
-        ))
+        ), stream=stream)
 
     answer = _run(go)
     _note(f"[graphrag/local] done ({time.perf_counter() - started:.1f}s)")
@@ -162,7 +169,7 @@ def local_search(query: str, level: int = 2, response_type: str = "Multiple Para
 # --- DRIFT search: community priming + iterative entity drill-down (GraphRAG engine) ------
 
 def drift_search(query: str, level: int = 2, response_type: str = "Multiple Paragraphs",
-                 verbose: bool = False) -> str:
+                 verbose: bool = False, stream: bool = True) -> str:
     """Prime on community reports, then drill into entities/relationships and refine iteratively.
 
     A hybrid of global (community sensemaking) and local (entity neighbourhood): it seeds from both
@@ -190,7 +197,7 @@ def drift_search(query: str, level: int = 2, response_type: str = "Multiple Para
             query=query,
             callbacks=_make_callbacks(verbose),
             verbose=verbose,
-        ))
+        ), stream=stream)
 
     answer = _run(go)
     _note(f"[graphrag/drift] done ({time.perf_counter() - started:.1f}s)")
@@ -200,7 +207,7 @@ def drift_search(query: str, level: int = 2, response_type: str = "Multiple Para
 # --- basic search: plain vector RAG over text units (GraphRAG engine) ---------------------
 
 def basic_search(query: str, response_type: str = "Multiple Paragraphs",
-                 verbose: bool = False) -> str:
+                 verbose: bool = False, stream: bool = True) -> str:
     """Plain vector RAG: retrieve the text units most similar to the query, then synthesize.
 
     No graph, no communities — just chunk retrieval. Needs the text_unit_text lancedb table.
@@ -221,7 +228,7 @@ def basic_search(query: str, response_type: str = "Multiple Paragraphs",
             query=query,
             callbacks=_make_callbacks(verbose),
             verbose=verbose,
-        ))
+        ), stream=stream)
 
     answer = _run(go)
     _note(f"[graphrag/basic] done ({time.perf_counter() - started:.1f}s)")
