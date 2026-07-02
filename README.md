@@ -35,6 +35,76 @@ rag/input/akjv.csv  ────────────────────
 
 ---
 
+## Architecture — the deep researcher
+
+`bgr research` runs a **LangGraph orchestrator** that decomposes the question and routes work across specialised agent roles, over **two complementary sources** — the Bible knowledge graph (GraphRAG) and scholarly literature (OpenAlex). Each round fans out to several parallel article-reader agents. The model split (`MAIN` vs `SMALL`) is the main cost lever.
+
+```mermaid
+flowchart TB
+    Q(["👤 bgr research «question»"]) --> WB["write_brief<br/>set brief + seed"]
+    WB --> PLAN
+
+    subgraph ROUND["🔁 research_round — repeats while depth&gt;0 and follow-ups remain · breadth ÷2 each round"]
+      direction TB
+      PLAN["🧠 Planner · MAIN<br/>generate_queries → N sub-queries<br/>each with a scholar_query"]
+
+      subgraph SRC1["📖 Source 1 · Bible graph — sequential per query"]
+        direction TB
+        CLS["🧭 Router · SMALL<br/>classify_method → local | global"]
+        GS["🔎 Graph Searcher · GraphRAG<br/>global ≤3/round, else falls back to local"]
+        DIS["📝 Distiller · SMALL<br/>answer ≤12k → learnings + follow-ups"]
+        CLS --> GS --> DIS
+      end
+
+      subgraph SRC2["🎓 Source 2 · literature — parallel fan-out"]
+        direction TB
+        GAT["🔭 Scholar Gatherer<br/>OpenAlex /works · Open-Access only"]
+        SEL["🎯 Selector<br/>round-robin ≤5 articles/round"]
+        RDR["📄 Article Reader Agents · SMALL<br/>≤6 in parallel<br/>full text → summary + refs + new queries"]
+        GAT --> SEL --> RDR
+      end
+
+      PLAN --> CLS
+      PLAN --> GAT
+      DIS --> ACC["📥 accumulate learnings + citations → next seed"]
+      RDR --> ACC
+    end
+
+    ACC -->|"depth&gt;0 and follow-ups"| PLAN
+    ACC -->|"rounds exhausted"| SY["🧩 Synthesizer · MAIN<br/>report .md + References + Search trail"]
+
+    GS  -.-> IDX[("🗂️ GraphRAG index<br/>Parquet + LanceDB · server-free")]
+    GAT -.-> OA(["OpenAlex"])
+    RDR -.-> JINA(["Jina Reader · full text / OCR"])
+    PLAN & CLS & DIS & RDR & SY -.LLM.-> OR(["☁️ OpenRouter · LLM + embeddings"])
+
+    classDef main  fill:#1f6feb,color:#fff,stroke:#0b3d91;
+    classDef small fill:#2ea043,color:#fff,stroke:#136229;
+    classDef eng   fill:#d29922,color:#111,stroke:#7a5600;
+    classDef svc   fill:#8250df,color:#fff,stroke:#4b2a86;
+    classDef store fill:#6e7681,color:#fff,stroke:#30363d;
+    class PLAN,SY main;
+    class CLS,DIS,RDR small;
+    class GS eng;
+    class OR,OA,JINA svc;
+    class IDX store;
+```
+
+| Agent | Model | Role |
+|---|---|---|
+| **Planner** | `MAIN` | Generates `N` sub-queries from the seed (each with a `scholar_query` for the scholarly search). |
+| **Router** | `SMALL` | Classifies each sub-query into `local` or `global` (drift is too slow per query). |
+| **Graph Searcher** | GraphRAG | Runs the search over the index; `global` is capped at 3/round, else falls back to `local`. |
+| **Distiller** | `SMALL` | Compresses the verbose answer (≤12k chars) into dense learnings + follow-up questions. |
+| **Scholar Gatherer** | — | One OpenAlex search per query; filters to Open-Access only, so every citation is verifiable. |
+| **Selector** | — | Round-robins across queries; picks ≤5 articles/round, skipping already-read works. |
+| **Article Readers** | `SMALL` | **Fan-out, ≤6 in parallel**: reads each article's full text (via Jina) and distils summary + references + new queries. |
+| **Synthesizer** | `MAIN` | Composes the final Markdown report + References + Search trail. |
+
+Cost governors: `MAX_GLOBAL_CALLS=3`, `MAX_DEEP_READS=5`, `DEEP_READ_CONCURRENCY=6`, `ANSWER_CHAR_CAP=12k`.
+
+---
+
 ## Features
 
 - **Pericope segmentation** — a whole chapter is too coarse for one extraction pass (entities get dropped, coreference resolves wrong). An LLM splits each chapter into contiguous, gap-free pericopes so GraphRAG extracts from small, focused units. Boundaries are cached, so you only pay the segmentation cost once.
